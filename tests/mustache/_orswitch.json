@@ -1,0 +1,97 @@
+{
+  "overview": "OR/SWITCH blocks\n",
+  "speed": 0,
+  "tests": [
+    {
+      "name": "TRUTHY OR (1)",
+      "desc": "...",
+      "data": {
+        "if": true
+      },
+      "template": "{{#if}}true{{|}}false{{/if}}",
+      "expected": "true"
+    },
+    {
+      "skip": 1,
+      "name": "TRUTHY OR (2)",
+      "desc": "...",
+      "data": {
+        "if_str": "0"
+      },
+      "template": "{{#if_str}}true{{|}}false{{/if_str}}",
+      "expected": "true"
+    },
+    {
+      "name": "FALSY OR (1)",
+      "desc": "...",
+      "data": {
+        "if": 0
+      },
+      "template": "{{^if}}Yes={{if}}{{|}}No{{/if}}",
+      "expected": "Yes=0"
+    },
+    {
+      "name": "FALSY OR (2)",
+      "desc": "...",
+      "data": {
+        "if": 1
+      },
+      "template": "{{^if}}No{{|}}Yes={{if}}{{/if}}",
+      "expected": "Yes=1"
+    },
+    {
+      "name": "SWITCH (1)",
+      "desc": "...",
+      "data": {
+        "if": 1
+      },
+      "template": "{{#if}}x=?{{|1}}x=1{{|}}falsy{{/if}}",
+      "expected": "x=1"
+    },
+    {
+      "name": "SWITCH (2)",
+      "desc": "...",
+      "data": {
+        "if": 1
+      },
+      "template": "{{^if}}falsy{{|1}}x=1{{|}}x=?{{/if}}",
+      "expected": "x=1"
+    },
+    {
+      "name": "SWITCH (3)",
+      "desc": "...",
+      "data": {
+        "if": 2
+      },
+      "template": "{{^if}}falsy{{|1}}x=1{{/if}}",
+      "expected": ""
+    },
+    {
+      "name": "SWITCH (4)",
+      "desc": "...",
+      "data": {
+        "if": 2
+      },
+      "template": "{{#if}}truthy{{|1}}x=1{{/if}}",
+      "expected": "truthy"
+    },
+    {
+      "name": "SWITCH (5)",
+      "desc": "...",
+      "data": {
+        "if": "two"
+      },
+      "template": "{{#if}}truthy{{|one}}x=one{{|two}}two{{/if}}",
+      "expected": "two"
+    },
+    {
+      "name": "SWITCH (6)",
+      "desc": "...",
+      "data": {
+        "if": [1,2,3,4,5]
+      },
+      "template": "{{#if}}{{#.}}{{.}}{{|1}}one{{|2|3|4}}.{{/}}{{/}}",
+      "expected": "one...5"
+    }
+  ]
+}
