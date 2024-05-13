@@ -23,7 +23,7 @@ its methods return `SM\Promise` objects.
 
 ## api spec
 <details>
-<summary><code>Conio::init(<u>array</u> $options=[]): ?<u>ErrorEx</u>
+<summary><code>Conio::init(): ?<u>ErrorEx</u>
 </code></summary>
 
 lets call it "initialize the terminal",
@@ -102,13 +102,9 @@ ESC code / request-response
 ...
 </details>
 
-## usage
-...
-
-
 
 <!-- links {{{ -->
 
-[alertable] https://learn.microsoft.com/en-us/windows/win32/fileio/alertable-i-o
+[alertable]: https://learn.microsoft.com/en-us/windows/win32/fileio/alertable-i-o
 
 <!-- }}} -->

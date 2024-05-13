@@ -1,9 +1,12 @@
 <?php declare(strict_types=1);
+namespace SM;
 require_once
   __DIR__.DIRECTORY_SEPARATOR.
   '..'.DIRECTORY_SEPARATOR.
-  'conio.php';
+  'autoload.php';
 ###
+Conio::init() && exit;
+ErrorLog::init(['ansi' => Conio::is_ansi()]);
 $logs = [
 # top multilines {{{
 [
@@ -207,14 +210,7 @@ if (0)
     json_encode($logs,  JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)
   );
 }
-if (class_exists('SM\Conio', false))
-{
-  \SM\ErrorLog::init([
-    'ansi' => \SM\Conio::is_ansi()
-  ]);
-}
-$out = \SM\ErrorLog::render($logs);
-echo $out;
+echo $out = ErrorLog::render($logs);
 if (0)
 {
   file_put_contents(
