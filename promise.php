@@ -3,60 +3,48 @@
 namespace SM;
 use
   SplDoublyLinkedList,SplObjectStorage,
-  Closure,Error,Throwable,ArrayAccess;
+  FFI,Closure,Error,Throwable,ArrayAccess;
 use function
   is_array,count,array_unshift,array_pop,array_push,
   array_reverse,in_array,implode,end,key,prev,
-  time,hrtime,usleep,function_exists,
-  register_shutdown_function,pcntl_async_signals,
+  time,hrtime,time_nanosleep,class_exists,
+  function_exists,register_shutdown_function,
   pcntl_signal_get_handler,pcntl_signal;
 use const
-  DIRECTORY_SEPARATOR,PHP_OS_FAMILY;
+  DIRECTORY_SEPARATOR,PHP_INT_MAX,PHP_OS_FAMILY;
 ###
 require_once __DIR__.DIRECTORY_SEPARATOR.'error.php';
 # }}}
 class Promise # {{{
 {
-  # TODO: composition guards
-  # TODO: object tests
-  # base {{{
+  # TODO: rename glue to completables
+  # TODO: then(<Promise>)?
+  # TODO: row/column result is incorrectly stored/passed
+  # TODO: cancellation on abolishment/gc, refs in the loop?
+  # TODO: time stats?
+  # basis {{{
   public ?array  $_reverse=null;
+  public ?object $_context=null;
   public ?object $_done=null,$result=null;
-  public int     $_idle=0,$pending=-1;
+  public int     $_time=PHP_INT_MIN,$pending=-1;
   public object  $_queue;
   ###
-  function __construct(object $action)
+  function __construct(object $o)
   {
     $this->_queue = new SplDoublyLinkedList();
-    $this->_queue->push($action);
+    $this->_queue->push($o);
   }
-  function _reverseAdd(object $action): void
-  {
-    if (!($q = &$this->_reverse)) {
-      $q = [];
-    }
-    if ($action instanceof PromiseGroup)
-    {
-      $action->_reverse &&
-      array_push($q, ...$action->_reverse);
-    }
-    elseif (!in_array($action, $q, true)) {
-      $q[] = $action;
-    }
+  function __destruct() {# TODO: references?
+    $this->cancel();
   }
   # }}}
-  # construction {{{
+  # construction (stasis) {{{
   static function from(object|array|null $x): self # {{{
   {
     return is_array($x)
       ? self::Column($x)
       : (($x instanceof self)
         ? $x : new self(Completable::from($x)));
-  }
-  # }}}
-  static function Context(object $o): self # {{{
-  {
-    return new self(new PromiseContext($o));
   }
   # }}}
   static function Value(...$v): self # {{{
@@ -73,32 +61,25 @@ class Promise # {{{
   static function Func(object $f, ...$a): self # {{{
   {
     return new self($a
-      ? new PromiseFunc($f, $a)
-      : new PromiseOp($f)
+      ? new Completable_Fn($f, $a)
+      : new Completable_Op($f)
     );
   }
   # }}}
-  static function Call(object $f, ...$a): self # {{{
+  static function When(bool $ok, object $x): self # {{{
   {
-    return new self(new PromiseCall($f, $a));
+    return new self($ok
+      ? Completable_OkayThen::from($x)
+      : Completable_FailThen::from($x)
+    );
   }
   # }}}
-  static function When(# {{{
-    bool $ok, object $x, ...$a
-  ):self
-  {
-    return new self(new PromiseWhen($ok, $a
-      ? new PromiseFunc($x, $a)
-      : Completable::from($x)
-    ));
-  }
-  # }}}
-  static function Timeout(# {{{
+  static function Delay(# {{{
     int $ms, object $x, ...$a
   ):self
   {
-    return new self(new PromiseTimeout($ms, $a
-      ? new PromiseFunc($x, $a)
+    return new self(new PromiseDelay($ms, $a
+      ? new Completable_Fn($x, $a)
       : Completable::from($x)
     ));
   }
@@ -123,7 +104,7 @@ class Promise # {{{
   # }}}
   # }}}
   # composition {{{
-  function done(object $f): self # {{{
+  function whenDone(object $f): self # {{{
   {
     $this->_done = $f;
     return $this;
@@ -131,37 +112,15 @@ class Promise # {{{
   # }}}
   function then(object $x, ...$a): self # {{{
   {
-    $q = $this->_queue;
-    if ($a) {# assume callable
-      $q->push(new PromiseFunc($x, $a));
+    if ($a) {
+      $this->_queueAppendOne(new Completable_Fn($x, $a));
     }
-    elseif ($x instanceof self)
-    {
-      # append all
-      foreach ($x->_queue as $action) {
-        $q->push($action);
-      }
+    elseif ($x instanceof self) {
+      $this->_queueAppend($x);
     }
-    else {# append one
-      $q->push(Completable::from($x));
+    else {
+      $this->_queueAppendOne(Completable::from($x));
     }
-    return $this;
-  }
-  # }}}
-  function thenCall(object $f, ...$a): self # {{{
-  {
-    $this->_queue->push(new PromiseCall($f, $a));
-    return $this;
-  }
-  # }}}
-  function thenTimeout(# {{{
-    int $ms, object $x, ...$a
-  ):self
-  {
-    $this->_queue->push(new PromiseTimeout($ms, $a
-      ? new PromiseFunc($x, $a)
-      : Completable::from($x)
-    ));
     return $this;
   }
   # }}}
@@ -169,262 +128,241 @@ class Promise # {{{
     array $group, int $break=1
   ):self
   {
-    $this->_queue->push(new PromiseColumn(
-      $group, $break
-    ));
-    return $this;
+    return $this->_queueAppendOne(
+      new PromiseColumn($group, $break)
+    );
   }
   # }}}
   function thenRow(# {{{
     array $group, int $break=0, int $first=0
   ):self
   {
-    $this->_queue->push(new PromiseRow(
-      $group, $break, $first
-    ));
-    return $this;
+    return $this->_queueAppendOne(
+      new PromiseRow($group, $break, $first)
+    );
   }
   # }}}
   # positive
   function okay(object $x, ...$a): self # {{{
   {
-    $this->_queue->push(new PromiseWhen(true, $a
-      ? new PromiseFunc($x, $a)
-      : Completable::from($x)
-    ));
-    return $this;
-  }
-  # }}}
-  function okayCall(object $f, ...$a): self # {{{
-  {
-    $this->_queue->push(new PromiseWhen(true,
-      new PromiseCall($f, $a)
-    ));
-    return $this;
-  }
-  # }}}
-  function okayTimeout(# {{{
-    int $ms, object $x, ...$a
-  ):self
-  {
-    $this->_queue->push(new PromiseWhen(true,
-      new PromiseTimeout($ms, $a
-        ? new PromiseFunc($x, $a)
-        : Completable::from($x)
-      )
-    ));
-    return $this;
+    return $this->_queueAppendOne($a
+      ? new Completable_OkayFn($x, $a)
+      : Completable_OkayThen::from($x)
+    );
   }
   # }}}
   function okayColumn(# {{{
     array $group, int $break=1
   ):self
   {
-    $this->_queue->push(new PromiseWhen(true,
+    return $this->_queueAppendOne(
+      new Completable_OkayThen(
       new PromiseColumn($group, $break)
     ));
-    return $this;
   }
   # }}}
   function okayRow(# {{{
     array $group, int $break=0, int $first=0
   ):self
   {
-    $this->_queue->push(new PromiseWhen(true,
+    return $this->_queueAppendOne(
+      new Completable_OkayThen(
       new PromiseRow($group, $break, $first)
     ));
-    return $this;
   }
   # }}}
   function okayFuse(object $x): self # {{{
   {
-    $this->_queue->push(new PromiseWhen(true,
+    return $this->_queueAppendOne(
+      new Completable_OkayThen(
       new PromiseFuse($x)
     ));
-    return $this;
   }
   # }}}
   # negative
   function fail(object $x, ...$a): self # {{{
   {
-    $this->_queue->push(new PromiseWhen(false, $a
-      ? new PromiseFunc($x, $a)
-      : Completable::from($x)
-    ));
-    return $this;
-  }
-  # }}}
-  function failCall(object $f, ...$a): self # {{{
-  {
-    $this->_queue->push(new PromiseWhen(false,
-      new PromiseCall($f, $a)
-    ));
-    return $this;
-  }
-  # }}}
-  function failTimeout(# {{{
-    int $ms, object $x, ...$a
-  ):self
-  {
-    $this->_queue->push(new PromiseWhen(false,
-      new PromiseTimeout($ms, $a
-        ? new PromiseFunc($x, $a)
-        : Completable::from($x)
-      )
-    ));
-    return $this;
+    return $this->_queueAppendOne($a
+      ? new Completable_FailFn($x, $a)
+      : Completable_FailThen::from($x)
+    );
   }
   # }}}
   function failColumn(# {{{
     array $group, int $break=0
   ):self
   {
-    $this->_queue->push(new PromiseWhen(false,
+    return $this->_queueAppendOne(
+      new Completable_FailThen(
       new PromiseColumn($group, $break)
     ));
-    return $this;
   }
   # }}}
   function failRow(# {{{
     array $group, int $break=0, int $first=0
   ):self
   {
-    $this->_queue->push(new PromiseWhen(false,
+    return $this->_queueAppendOne(
+      new Completable_FailThen(
       new PromiseRow($group, $break, $first)
     ));
-    return $this;
   }
   # }}}
   function failFuse(object $x): self # {{{
   {
-    $this->_queue->push(new PromiseWhen(false,
+    return $this->_queueAppendOne(
+      new Completable_FailThen(
       new PromiseFuse($x)
     ));
+  }
+  # }}}
+  # }}}
+  # management {{{
+  function _reverseAdd(object $action): void # {{{
+  {
+    if (!($q = &$this->_reverse)) {
+      $q = [];
+    }
+    if ($action instanceof PromiseGroup)
+    {
+      $action->_reverse &&
+      array_push($q, ...$action->_reverse);
+    }
+    elseif (!in_array($action, $q, true)) {
+      $q[] = $action;
+    }
+  }
+  # }}}
+  function _queueGet(): object # {{{
+  {
+    if ($this->pending >= 0)
+    {
+      throw ErrorEx::fail(__CLASS__,
+        'composition is only possible '.
+        'with fresh promises'
+      );
+    }
+    return $this->_queue;
+  }
+  # }}}
+  function _queueAppend(object $promise): self # {{{
+  {
+    $q = $this->_queueGet();
+    foreach ($queue as $action) {
+      $q->push($action);
+    }
     return $this;
   }
   # }}}
-  # }}}
-  function _init(?object $r=null): bool # {{{
+  function _queueAppendOne(object $comp): self # {{{
   {
-    if (~$this->pending) {
-      return false;
+    $this->_queueGet()->push($comp);
+    return $this;
+  }
+  # }}}
+  function _queuePrepend(object $promise): void # {{{
+  {
+    $q0 = $this->_queue;
+    $q1 = $promise->_queue;
+    $i  = $q1->count();
+    $this->pending += $i;
+    while (--$i >= 0) {
+      $q0->unshift($q1->offsetGet($i));
     }
-    $this->pending = $this->_queue->count();
-    $this->result  = $r ?: new PromiseResult();
+  }
+  # }}}
+  function _queuePrependOne(object $completable): void # {{{
+  {
+    $this->pending++;
+    $this->_queue->unshift($completable);
+  }
+  # }}}
+  function _queueInject(object $promise): void # {{{
+  {
+    $q0 = $this->_queue;
+    $o0 = $q0->shift();
+    $q1 = $promise->_queue;
+    $i  = $q1->count();
+    $this->pending += $i;
+    while (--$i >= 0) {
+      $q0->unshift($q1->offsetGet($i));
+    }
+    $q0->unshift($o0);
+  }
+  # }}}
+  function _queueInjectOne(object $completable): void # {{{
+  {
+    $q0 = $this->_queue;
+    $o0 = $q0->shift();
+    $this->pending++;
+    $q0->unshift($completable);
+    $q0->unshift($o0);
+  }
+  # }}}
+  function _queueTruncate(): void # {{{
+  {
+    $q = new SplDoublyLinkedList();
+    $q->push($this->_queue->offsetGet(0));
+    $this->_queue  = $q;
+    $this->pending = 1;
+  }
+  # }}}
+  # }}}
+  function _init(?object $r=null): self # {{{
+  {
+    if ($this->pending < 0)
+    {
+      # prepare result object
+      $r || $r = new PromiseResult();
+      $r->promise = $this;
+      # initialize self
+      $this->pending = $this->_queue->count();
+      $this->result  = $r;
+    }
+    return $this;
+  }
+  # }}}
+  function _execute(): bool # {{{
+  {
+    # prepare
+    $o = $this->_queue->offsetGet(0);
+    $o->result || $o->result = $this->result;
+    # execute completion routine
+    if ($o->_complete())
+    {
+      # eject one
+      $this->_queue->shift();
+      if (--$this->pending)
+      {
+        # more completables pending,
+        # check immediate execution
+        return ($this->_time === 0)
+          ? $this->_execute() # recurse now
+          : true;# repeat later
+      }
+      # finish execution
+      $this->_finit();
+      return false;# not valid anymore
+    }
+    # repeat on the next tick
     return true;
   }
   # }}}
-  function _execute(): ?object # {{{
+  function _finit(): void # {{{
   {
-    # prepare
-    $q = $this->_queue;
-    if (!($a = $q->offsetGet(0))->result) {
-      $a->result = $this->result;
-    }
-    # invoke completion routine
-    if (!($x = $a->_complete()))
+    if ($this->_context)
     {
-      # action is complete,
-      # collect reversible
-      if ($a instanceof Reversible) {
-        $this->_reverseAdd($a);
-      }
-      # eject and finish
-      $q->shift();
-      return --$this->pending
-        ? null : $this->result->_done($this);
+      $this->_context->_done();
+      $this->_context = null;
     }
-    # handle repetition
-    if ($x === $a) {
-      return null;
-    }
-    # handle dynamic continuation
-    if ($x === Completable::$THEN)
+    if ($this->_done)
     {
-      switch ($x->getId()) {
-      case 1:# delayed repetition {{{
-        $this->_idle = $x->time;
-        return null;
-        # }}}
-      case 2:# immediate recursion {{{
-        $q->shift();
-        return --$this->pending
-          ? $this->_execute()
-          : $this->result->_done($this);
-        # }}}
-      case 3:# immediate expansive recursion {{{
-        if (($x = $x->getAction()) instanceof self)
-        {
-          # remove current
-          $q->shift();
-          # expand
-          $x = $x->_queue;
-          $j = $x->count();
-          $this->pending += $j - 1;
-          while (--$j >= 0) {
-            $q->unshift($x->offsetGet($j));
-          }
-        }
-        else
-        {
-          # current action replacement
-          $q->offsetSet(0, Completable::from($x));
-        }
-        return $this->_execute();
-        # }}}
-      case 4:# fusion {{{
-        if (($x = $x->getAction()) instanceof self)
-        {
-          # many
-          $this->_queue = $q = $x->_queue;
-          $this->pending = $q->count();
-        }
-        else
-        {
-          # one
-          $this->_queue = $q = new SplDoublyLinkedList();
-          $q->push(Completable::from($x));
-          $this->pending = 1;
-        }
-        return null;
-        # }}}
-      case 5:# immediate self-cancellation {{{
-        return $this->cancel();
-        # }}}
-      case 6:# immediate self-completion {{{
-        $this->pending = 0;
-        return $this->result->_done($this);
-        # }}}
-      default:# unknown {{{
-        $q->shift();
-        return --$this->pending
-          ? null : $this->result->_done($this);
-        # }}}
-      }
+      ($this->_done)($this->result->_done());
+      $this->_done = null;
     }
-    # collect reversible
-    if ($a instanceof Reversible) {
-      $this->_reverseAdd($a);
+    else {
+      $this->result->_done();
     }
-    # expansive continuation
-    if ($x instanceof self)
-    {
-      # remove current
-      $q->shift();
-      # expand
-      $x = $x->_queue;
-      $j = $x->count();
-      $this->pending += $j - 1;
-      while (--$j >= 0) {
-        $q->unshift($x->offsetGet($j));
-      }
-    }
-    else
-    {
-      # replacement
-      $q->offsetSet(0, Completable::from($x));
-    }
-    return null;
   }
   # }}}
   function cancel(): ?object # {{{
@@ -435,13 +373,13 @@ class Promise # {{{
     }
     # get current action and
     # cancel it if it was initialized
-    $a = $this->_queue->offsetGet(0);
-    $a->result && $a->_cancel();
+    $o = $this->_queue->offsetGet(0);
+    $o->result && $o->_cancel();
     # set cancelled
     $this->pending = 0;
     $r = $this->result->_cancel();
     # undo finished reversible actions
-    if ($q = &$this->_reverse)
+    if ($q = $this->_reverse)
     {
       $i = count($q);
       while (--$i >= 0)
@@ -449,21 +387,19 @@ class Promise # {{{
         $q[$i]->result = $r;
         $q[$i]->_undo();
       }
-      $q = null;
+      $this->_reverse = null;
     }
-    # complete
-    return $r->_done($this);
+    # finish
+    $this->_finit();
+    return $r;
   }
   # }}}
 }
 # }}}
 class Loop # {{{
 {
-  # TODO: avoid execution of already executing promises
-  # TODO: collect statistics
   const # {{{
-    MAX_TIMEOUT = 24*60*60*1000000000,
-    SIGNAL = [# unix termination signals {{{
+    SIGNAL = [# nix termination signals
       1,# SIGHUP: terminal is closed
       2,# SIGINT: terminal interrupt (Ctrl+C)
       3,# SIGQUIT: terminal asks to quit
@@ -486,251 +422,289 @@ class Loop # {{{
       29,# SIGPOLL: pollable event
       31,# SIGSYS: bad system call
     ];
-    # }}}
+  ###
   # }}}
-  # constructor {{{
-  public object $row;
+  # basis {{{
+  public object $row,$sys;
   public array $column=[];
   public int $rowCnt=0,$colCnt=0,$added=0;
+  public int $spinLevel=0,$spinYield=0;
+  static int $TIME=0,$HRTIME=0;# current time
   private static ?self $LOOP=null;
   private function __construct()
   {
-    # initialize
-    $this->row = new SplObjectStorage();
-    Completable::$TIME = time();
-    Completable::$HRTIME = hrtime(true);
-    # set termination handlers
-    if (PHP_OS_FAMILY !== 'Windows') {
-      $this->setSignals();
+    # check the requirement
+    if (!class_exists('FFI'))
+    {
+      throw ErrorEx::fail(__CLASS__,
+        'FFI extension is required'
+      );
     }
+    # initialize
+    self::$TIME   = time();
+    self::$HRTIME = hrtime(true);
+    $this->row    = new SplObjectStorage();
+    if (PHP_OS_FAMILY === 'Windows')
+    {
+      # windows usleep/nanosleep implementation
+      # in PHP relies on a waitable timer event
+      # that prevents process entering
+      # the generic alertable state and
+      # only wastes time on that timer;
+      $this->sys = FFI::cdef(
+        'uint32_t SleepEx(uint32_t,uint32_t);',
+        'kernel32.dll'
+      );
+    }
+    else
+    {
+      $this->sys = FFI::cdef(
+        #'struct timespec '.
+        #"{uint64_t tv_sec,tv_nsec;}\n".
+        #"int nanosleep".
+        #"(struct timespec*, struct timespec*);",
+        'int sched_yield();',
+        'libc.so.6'
+      );
+      # the OS can axe the runtime without
+      # it running shutdown handlers on certain
+      # signals been set to default;
+      # replace default handlers to avoid that
+      if (function_exists('pcntl_signal'))
+      {
+        $def = \SIG_DFL;
+        $fun = (function(int $n): void {
+          static $DONE=false;
+          if (!$DONE)
+          {
+            $DONE = true;
+            exit(0x80|$n);
+          }
+        });
+        foreach (self::SIGNAL as $n)
+        {
+          if (pcntl_signal_get_handler($n) === $def) {
+            pcntl_signal($n, $fun);
+          }
+        }
+      }
+    }
+    # enable graceful termination
     register_shutdown_function(
       $this->stop(...)
     );
   }
-  static function init(): bool
-  {
+  static function _init(): void {
     self::$LOOP || self::$LOOP = new self();
-    return true;
   }
   # }}}
-  function setSignals(): bool # {{{
+  # internals {{{
+  function enter(): self # {{{
   {
-    # check feasible
-    if (function_exists('pcntl_signal')) {
-      return false;
+    if ($this->spinLevel)
+    {
+      throw ErrorEx::fatal(
+        "main loop is locked\n".
+        "nested loops are not supported\n".
+        "use promise chaining instead"
+      );
     }
-    # create handler function
-    static $f=null;
-    $f || $f = (function(int $n): void {
-      static $x=true;
-      if ($x)
+    $this->spinLevel++;
+    return $this;
+  }
+  # }}}
+  function attach(object $p, string $id=''): self # {{{
+  {
+    if ($id === '')
+    {
+      if (!$this->row->contains($p))
       {
-        $x = false;
-        exit(0x80|$n);
-      }
-    });
-    # set termination signals
-    static $DFL=\SIG_DFL;
-    foreach (self::SIGNAL as $n)
-    {
-      # replace default handler
-      if (pcntl_signal_get_handler($n) === $DFL) {
-        pcntl_signal($n, $f);
+        $this->row->attach($p->_init());
+        $this->rowCnt++;
+        $this->added++;
       }
     }
-    # enable asynchronous callbacks
-    pcntl_async_signals(true);
-    return true;
-  }
-  # }}}
-  function rowAdd(object $p): self # {{{
-  {
-    if (!$this->row->contains($p))
+    elseif (isset($this->columns[$id]))
     {
-      $p->_init();
-      $this->row->attach($p);
-      $this->rowCnt++;
+      $q = $this->columns[$id];
+      $q->push($p);
+    }
+    else
+    {
+      $q = new SplDoublyLinkedList();
+      $q->push($p->_init());
+      $this->columns[$id] = $q;
+      $this->colCnt++;
       $this->added++;
     }
     return $this;
   }
   # }}}
-  function colAdd(object $p, string $id): bool # {{{
-  {
-    if (isset($this->columns[$id]))
-    {
-      # get existing queue
-      $q = $this->columns[$id];
-    }
-    elseif ($p->_init())
-    {
-      # create new queue
-      $q = new SplDoublyLinkedList();
-      $this->columns[$id] = $q;
-      $this->colCnt++;
-      $this->added++;
-    }
-    else {
-      return false;
-    }
-    # stack up
-    $q->push($p);
-    return true;
-  }
-  # }}}
   function spin(): int # {{{
   {
-    # update low resolution timestamp
-    # when new promises added,
-    # it is used in their result construction
+    # update timestamps
     if ($this->added)
     {
       $this->added = 0;
-      Completable::$TIME = time();
+      self::$TIME = time();
     }
-    # update high resolution timestamp and
-    # determine maximal idle from now on
-    Completable::$HRTIME = $t = hrtime(true);
-    $idleTime = $t + self::MAX_TIMEOUT;
-    $idleCnt  = 0;
-    # spin columns
-    # {{{
-    if ($n0 = &$this->colCnt)
+    self::$HRTIME = $t = hrtime(true);
+    # prepare vars
+    $idleStop = $t + 999999999;# ~1s
+    $idleCnt  = $n0 = $n1 = $n2 = 0;
+    # spin the row {{{
+    if ($i = $this->rowCnt)
     {
-      $q0 = &$this->columns;
-      $q1 = end($q0);
-      do
-      {
-        $p = $q1->offsetGet(0);
-        if ($z = $p->_idle)
-        {
-          # it is idle,
-          # skip for this time?
-          if ($z > $t)
-          {
-            $idleCnt++;
-            if ($idleTime > $z) {
-              $idleTime = $z;
-            }
-            continue;
-          }
-          # activate
-          $p->_idle = $z = 0;
-        }
-        if ($p->_execute())
-        {
-          # one complete,
-          # remove it from the queue
-          $q1->shift();
-          if ($q1->isEmpty())
-          {
-            # this column is finished
-            unset($q0[key($q0)]);
-            $n0--;
-          }
-          else
-          {
-            # initialize and probe next item
-            $p = $q1->offsetGet(0);
-            $p->_init() && $p->_execute();
-          }
-        }
-        elseif ($z)
-        {
-          # became idle
-          $idleCnt++;
-          if ($idleTime > $z) {
-            $idleTime = $z;
-          }
-        }
-      }
-      while ($q1 = prev($q0));
-    }
-    # }}}
-    # spin the row
-    # {{{
-    if ($n1 = &$this->rowCnt)
-    {
-      # its important to maintain the
-      # straight forward order of execution
+      # its important to follow
+      # the natural (straight) order of execution
       # because module gears that spin forever
-      # are added before promises that
-      # depend on their results..
-      $q1 = $this->row;
-      $q1->rewind();
-      for ($k=$n1; $k; --$k)
-      {
-        $p = $q1->current();
-        if ($z = $p->_idle)
-        {
-          # promise is idle,
-          # skip for this time?
-          if ($z > $t)
-          {
-            $q1->next();
-            $idleCnt++;
-            if ($idleTime > $z) {
-              $idleTime = $z;
-            }
-            continue;
-          }
-          # activate
-          $p->_idle = $z = 0;
-        }
-        if ($p->_execute())
-        {
-          # promise is settled,
-          # remove it from the queue
-          $q1->detach($p);
-          $n1--;
-        }
-        else
-        {
-          # check became idle
-          if ($z)
-          {
-            $idleCnt++;
-            if ($idleTime > $z) {
-              $idleTime = $z;
-            }
-          }
-          # march to the next
-          $q1->next();
-        }
+      # are added before promises that depend on them
+      $q = $this->row;
+      $q->rewind();
+    a1:# get the promise
+      $p = $q->current();
+      # check cancelled
+      if ($p->pending === 0) {
+        goto a2;
       }
+      # check in the idle state
+      if ($p->_time > $t) {
+        goto a3;
+      }
+      # do the work
+      if ($p->_execute()) {
+        goto a4;
+      }
+    a2:# promise is done (completed/cancelled)
+      $q->detach($p);
+      $n1++;
+      if (--$i) {
+        goto a1;
+      }
+      goto a5;
+    a3:# promise is idle
+      $idleCnt++;
+      if ($idleStop > $p->_time) {
+        $idleStop = $p->_time;
+      }
+    a4:# proceed to the next item
+      $n0++;
+      if (--$i)
+      {
+        $q->next();
+        goto a1;
+      }
+    a5:# done
     }
     # }}}
-    # finished?
-    if (!($k = $n0 + $n1)) {
-      return 0;
-    }
-    # the process is in alertable wait state,
-    # notify OS with traditional sleep (not usleep),
-    # it should invoke any pending callbacks
-    # TODO: probably make an explicit promise flag
-    \sleep(0);
-    # cooldown?
-    if ($k === $idleCnt)
+    # spin columns {{{
+    if ($this->colCnt)
     {
-      # determine projected sleep time
-      $i = $idleTime - $t;
-      # update high resolution timestamp and
-      # determine cycle execution time
-      Completable::$HRTIME = $j = hrtime(true);
-      $j -= $t;
-      # substract cycle execution and
-      # convert into microseconds
-      $i = (int)(($i - $j) / 1000);
-      # sleep in big chunks
-      while ($i > 500000)
-      {
-        usleep(500000);
-        $i -= 500000;
+      # columns could be executed in reverse order,
+      # other stuff is similar to the row
+      $a = &$this->columns;
+      $q = end($a);
+    b1:# get the promise
+      $p = $q->offsetGet(0);
+      # check cancelled
+      if ($p->pending === 0) {
+        goto b2;
       }
-      # sleep the remaining chunk
-      usleep(($i > 0) ? $i : 1);
+      # check in the idle state
+      if ($p->_time > $t) {
+        goto b3;
+      }
+      # do the work
+      if ($p->_execute())
+      {
+        $n0++;
+        goto b4;
+      }
+    b2:# promise is done
+      $q->shift();
+      if ($q->isEmpty()) {# remove exhausted column
+        unset($a[key($a)]);
+      }
+      else {# initialize the next promise
+        $q->offsetGet(0)->_init();
+      }
+      $n2++;
+      goto b4;
+    b3:# promise is idle
+      $n0++;
+      $idleCnt++;
+      if ($idleStop > $p->_time) {
+        $idleStop = $p->_time;
+      }
+    b4:# proceed to the next item
+      if ($q = prev($a)) {
+        goto b1;
+      }
+      # done
     }
-    return $k;
+    # }}}
+    # update counters
+    $n1 && $this->rowCnt -= $n1;
+    $n2 && $this->colCnt -= $n2;
+    # check nothing is pending/running
+    if ($n0 === 0) {
+      return $n1;
+    }
+    # when running and idle counts are equal,
+    # there's no need in CPU consumption
+    if ($n0 === $idleCnt)
+    {
+      # process must enter the sleeping state,
+      # either IO resource isnt currently available,
+      # or, there's nothing left to do.
+      # this implementation does not sleep
+      # on "magical" wait queues/channels -
+      # the proper time estimation is delegated
+      # to the "gears" - individual promise authors;
+      ###
+      # determine projected sleep time and
+      # relinquish cpu
+      $this->sleep($idleStop - $t);
+    }
+    elseif ($this->spinYield)
+    {
+      # the loop is in the yield mode -
+      # its giving up CPU at every tick;
+      # this behaviour might be useful when
+      # there is another process or thread
+      # doing the main job..
+      ###
+      $this->sleep(0);
+    }
+    return $n1;
+  }
+  # }}}
+  function sleep(int $ns): void # {{{
+  {
+    if (PHP_OS_FAMILY === 'Windows')
+    {
+      $this->sys->SleepEx(
+        (int)($ns / 1000000),# nano => milli
+        1 # alertable
+      );
+    }
+    else
+    {
+      # it's said that delays smaller than 2ms
+      # are implemented as busy-waits, so
+      # check and switch to another process
+      if ($ns > 2000000) {
+        time_nanosleep(0, $ns);
+      }
+      else {
+        $this->sys->sched_yield();
+      }
+    }
+  }
+  # }}}
+  function leave(): void # {{{
+  {
+    $this->spinLevel--;
   }
   # }}}
   function stop(): void # {{{
@@ -738,320 +712,410 @@ class Loop # {{{
     # stop columns
     if ($this->colCnt)
     {
-      $q0 = &$this->columns;
-      $q1 = end($q0);
-      do {
-        $q1->offsetGet(0)->cancel();
+      foreach ($this->columns as $id => $q) {
+        $q->offsetGet(0)->cancel();
       }
-      while ($q1 = prev($q0));
-      $q0 = [];
+      $this->columns = [];
       $this->colCnt = 0;
     }
     # stop the row
-    if ($n = $this->rowCnt)
+    if ($i = $this->rowCnt)
     {
-      $q1 = $this->row;
-      $q1->rewind();
-      while ($n--)
+      # the row promises should be cancelled
+      # from the last to the first one,
+      # this requires unloading into a list
+      $a = [];
+      $q = $this->row;
+      $q->rewind();
+      for ($j=0; $j < $i; ++$j)
       {
-        $q1->current()->cancel();
-        $q1->next();
+        $a[] = $q->current();
+        $q->next();
       }
+      while (--$i >= 0) {
+        $a[$i]->cancel();
+      }
+      unset($a);
       $this->row = new SplObjectStorage();
       $this->rowCnt = 0;
     }
   }
   # }}}
+  # }}}
+  # stasis {{{
+  # inner
   static function gear(object $o): object # {{{
   {
-    # loop gears are completables that
-    # are initialized before their container,
-    # this enables cancellation
-    # without a single pass/execution
-    $o->result = new PromiseResult();
-    $p = new Promise($o);
-    $p->_init($o->result);
-    # gears are placed in the row with
-    # other promises.. normally,
-    # they execute indefinitely and
-    # are removed upon cancellation
-    self::$LOOP->rowAdd($p);
-    return $p;
+    # a gear is a completable that
+    # is initialized with its carrier promise -
+    # it enables cancellation without a single run;
+    # gears are placed in the loop's row
+    # prior to other/dependant promises;
+    # they suppose to execute indefinitely and
+    # are removed upon cancellation which
+    # usually happens on shutdown.
+    ###
+    self::$LOOP->attach((new Promise($o))->_init(
+      $o->result = new PromiseResult()
+    ));
+    return $o;
   }
   # }}}
+  static function cooldown(int $ms=0): void # {{{
+  {
+    self::$LOOP->sleep(
+      $ms ? (int)($ms * 1000000) : 0
+    );
+  }
+  # }}}
+  static function yield_more(): void # {{{
+  {
+    self::$LOOP->spinYield++;
+  }
+  # }}}
+  static function yield_less(): void # {{{
+  {
+    self::$LOOP->spinYield--;
+  }
+  # }}}
+  # outer
   static function await(object $p): object # {{{
   {
-    $LOOP = self::$LOOP->rowAdd($p);
-    do {
-      $LOOP->spin();
+    $loop = self::$LOOP->enter()->attach($p);
+  a1:
+    if ($loop->spin() === 0) {
+      goto a1;
     }
-    while ($p->pending);
+    if ($p->pending) {
+      goto a1;
+    }
+    $loop->leave();
     return $p->result;
   }
   # }}}
-  static function await_any(array $a): int # {{{
+  static function await_all(array $a): array # {{{
   {
-    # check number of elements
-    if (($k = count($a)) < 2) {
-      return -1;
-    }
-    # count pending
-    for ($i=0,$j=0; $i < $k; ++$i)
-    {
-      # filter empty slots
-      if (!$a[$i]) {
-        continue;
-      }
-      # complete at first finished
-      if (!$a[$i]->pending) {
-        return $i;
-      }
-      # count
-      $j++;
-    }
-    # check nothing is pending
-    if (!$j) {
-      return -1;
-    }
     # add to the loop
-    $LOOP = self::$LOOP;
-    for ($i=0; $i < $k; ++$i)
+    $loop = self::$LOOP->enter();
+    for ($i=0,$j=count($a) - 1; $i <= $j; ++$i) {
+      $loop->attach($a[$i]);
+    }
+  a1:
+    # execute
+    if ($loop->spin() === 0) {
+      goto a1;
+    }
+  a2:
+    # check the last one
+    if ($a[$j]->pending) {
+      goto a1;
+    }
+    # replace promise with its result
+    $a[$j] = $a[$j]->result;
+    # check more to complete
+    if ($j > 0)
     {
-      if ($a[$i] && $a[$i]->pending < 0) {
-        $LOOP->rowAdd($a[$i]);
+      $j--;
+      goto a2;
+    }
+  a3:
+    # complete
+    $loop->leave();
+    return $a;
+  }
+  # }}}
+  static function await_any(array $a, bool $cancel): ?object # {{{
+  {
+    # prepare
+    $loop = self::$LOOP->enter();
+    for ($i=0,$j=0,$k=count($a) - 1; $i <= $k; ++$i)
+    {
+      # for practical reasons,
+      # some slots allowed to be void,
+      # have to check it's a promise
+      if ($p = $a[$i])
+      {
+        # the promise state may vary,
+        # this is different from previous awaits,
+        # check it and decide
+        if ($p->pending < 0) {
+          $loop->attach($p);
+        }
+        elseif ($p->pending === 0) {
+          goto a2;# instant completion
+        }
+        $j++;
       }
     }
-    # execute
-    while (1)
+    # check there is nothing
+    if ($j === 0)
     {
-      $LOOP->spin();
-      for ($i=0; $i < $k; ++$i)
+      $loop->leave();
+      return null;
+    }
+  a1:
+    # execute
+    if (($kk = $loop->spin()) === 0) {
+      goto a1;
+    }
+    # find first completed
+    for ($i=0; $i <= $k; ++$i)
+    {
+      if ($a[$i] && $a[$i]->pending === 0) {
+        goto a2;
+      }
+    }
+    goto a1;
+  a2:
+    # cancel the rest when necessary
+    if ($cancel)
+    {
+      do
       {
-        if ($a[$i] && !$a[$i]->pending) {
-          return $i;
+        if ($k !== $i && $a[$k]) {
+          $a[$k]->cancel();
         }
       }
+      while ($k--);
     }
-    throw ErrorEx::fatal('unexpected');
+    # complete
+    $r = $a[$i]->result;
+    $r->index = $i;
+    $loop->leave();
+    return $r;
   }
+  # }}}
   # }}}
 }
 # }}}
 abstract class Completable # {{{
 {
   public ?object $result=null;
+  abstract function _complete(): bool;
   function _cancel(): void {}
-  abstract function _complete(): ?object;
   ###
-  static object $THEN;# dynamic continuator
-  static int    $TIME=0,$HRTIME=0;# current time
   static function from(?object $x): object
   {
     return $x
       ? (($x instanceof self)
         ? $x
         : (($x instanceof Closure)
-          ? new PromiseOp($x)
+          ? new Completable_Op($x)
           : (($x instanceof Error)
             ? new PromiseError($x)
             : new PromiseValue($x))))
       : new PromiseNop();
   }
 }
-# }}}
-abstract class Contextable extends Completable # {{{
+abstract class Contextable extends Completable
 {
-  abstract function _done(): void;
+  function _cancel(): void {$this->_done();}
+  function _reset(): void {}
+  abstract function _done(): bool;
 }
-# }}}
-abstract class Reversible extends Completable # {{{
-{
+abstract class Reversible extends Completable {
   abstract function _undo(): void;
 }
 # }}}
 # actions {{{
-abstract class PromiseAction extends Completable # {{{
+abstract class Completable_Action extends Completable
 {
-  function repeat(int $ms=0): object {
-    return $ms ? self::$THEN->wait($ms) : $this;
-  }
-  function abort(): object {
-    return self::$THEN->abort();
-  }
-  function __call(string $m, array $a): mixed {
-    return $this->result->context->$m(...$a);
+  abstract function invoke(object $r): ?object;
+  function _complete(): bool
+  {
+    # user handler is guarded
+    try
+    {
+      $r = $this->result;
+      if ($o = $this->invoke($r))
+      {
+        # user wants to repeat
+        if ($o === $r) {
+          return false;
+        }
+        # user wants to swap
+        $r->promiseInject($o);
+      }
+    }
+    catch (Throwable $e) {
+      $r->error($e);
+    }
+    return true;
   }
 }
-# }}}
-class PromiseOp extends PromiseAction # {{{
+class Completable_Op extends Completable_Action
 {
   function __construct(
     public object $func
   ) {}
-  function _complete(): ?object
-  {
-    try {
-      return ($this->func)($this);
-    }
-    catch (Throwable $e) {
-      return ErrorEx::from($e, true);
-    }
+  function invoke(object $r): ?object {
+    return ($this->func)($r);
   }
 }
-# }}}
-class PromiseFunc extends PromiseAction # {{{
+class Completable_OkayOp extends Completable_Op
+{
+  function invoke(object $r): ?object
+  {
+    return $r->ok
+      ? ($this->func)($r)
+      : $r->promiseNoDelay();
+  }
+}
+class Completable_FailOp extends Completable_Op
+{
+  function invoke(object $r): ?object
+  {
+    return $r->ok
+      ? $r->promiseNoDelay()
+      : ($this->func)($r);
+  }
+}
+class Completable_Fn extends Completable_Action
 {
   function __construct(
     public object $func,
-    public array  $arg,
+    public array  $args
   ) {}
-  function _complete(): ?object
-  {
-    try {
-      return ($this->func)($this, ...$this->arg);
-    }
-    catch (Throwable $e) {
-      return ErrorEx::from($e, true);
-    }
+  function invoke(object $r): ?object {
+    return ($this->func)($r, ...$this->args);
   }
 }
-# }}}
-class PromiseCall extends PromiseFunc # {{{
+class Completable_OkayFn extends Completable_Fn
 {
-  function _complete(): ?object
+  function invoke(object $r): ?object
   {
-    try {
-      return ($this->func)(...$this->arg);
-    }
-    catch (Throwable $e) {
-      return ErrorEx::from($e, true);
-    }
+    return $r->ok
+      ? ($this->func)($r, ...$this->args)
+      : $r->promiseNoDelay();
+  }
+}
+class Completable_FailFn extends Completable_Fn
+{
+  function invoke(object $r): ?object
+  {
+    return $r->ok
+      ? $r->promiseNoDelay()
+      : ($this->func)($r, ...$this->args);
   }
 }
 # }}}
-# }}}
-# action helpers {{{
+# composition glue {{{
 class PromiseNop extends Completable # {{{
 {
-  function _complete(): ?object {
-    return null;
+  function _complete(): bool {
+    return true;
   }
 }
 # }}}
-class PromiseError extends PromiseNop # {{{
+abstract class Completable_Then extends Completable # {{{
+{
+  function __construct(
+    public object $what
+  ) {}
+}
+class Completable_OkayThen extends Completable_Then
+{
+  function _complete(): bool
+  {
+    $r = $this->result;
+    $r->ok && $r->promiseInject($this->what);
+    $r->promiseNoDelay();
+    return true;
+  }
+  static function from(?object $x): object
+  {
+    return ($x instanceof Closure)
+      ? new Completable_OkayOp($x)
+      : new self($x);
+  }
+}
+class Completable_FailThen extends Completable_Then
+{
+  function _complete(): bool
+  {
+    $r = $this->result;
+    $r->ok || $r->promiseInject($this->what);
+    $r->promiseNoDelay();
+    return true;
+  }
+  static function from(?object $x): object
+  {
+    return ($x instanceof Closure)
+      ? new Completable_FailOp($x)
+      : new self($x);
+  }
+}
+# }}}
+class PromiseError extends Completable # {{{
 {
   function __construct(
     public object $error
   ) {}
-  function _complete(): ?object
+  function _complete(): bool
   {
-    $this->result->error($this->error);
-    return self::$THEN->hop();
+    $this->result
+      ->error($this->error)
+      ->promiseNoDelay();
+    ###
+    return true;
   }
 }
 # }}}
-class PromiseContext extends PromiseNop # {{{
-{
-  function __construct(
-    public object $context
-  ) {}
-  function _complete(): ?object
-  {
-    # check current
-    if (($r = $this->result)->context)
-    {
-      # check for equality (dont switch)
-      if ($r->context === $this->context) {
-        return self::$THEN->hop();
-      }
-      # switch
-      $r->context->_done();
-    }
-    # continue
-    return $r->context = $this->context;
-  }
-}
-# }}}
-class PromiseValue extends PromiseNop # {{{
+class PromiseValue extends Completable # {{{
 {
   function __construct(
     public mixed $value
   ) {}
-  function _complete(): ?object
+  function _complete(): bool
   {
-    $this->result->extend()->setRef($this->value);
-    return self::$THEN->hop();
+    $this->result
+      ->valueSet($this->value)
+      ->promiseNoDelay();
+    ###
+    return true;
   }
 }
 # }}}
-class PromiseWhen extends PromiseNop # {{{
+class PromiseFuse extends Completable # {{{
 {
   function __construct(
-    public bool   $ok,
-    public object $action
+    public object $fuse
   ) {}
-  function _complete(): ?object
+  function _complete(): bool
   {
-    # select action when condition met
-    $a = ($this->result->ok === $this->ok)
-      ? $this->action
-      : null;
-    # hop to the next or selected action
-    return self::$THEN->hop($a);
+    $this->result->promiseFuse($this->fuse);
+    return true;
   }
 }
 # }}}
-class PromiseFuse extends PromiseNop # {{{
+class PromiseDelay extends Completable # {{{
 {
+  public int $stage=1;
   function __construct(
-    public object $action
-  ) {}
-  function _complete(): ?object
-  {
-    $this->result->_fuse();
-    return self::$THEN->fuse($this->action);
-  }
-}
-# }}}
-class PromiseTimeout extends PromiseNop # {{{
-{
-  const MAX_DELAY = 24*60*60*1000;# millisec
-  static function check(int $ms): ?object # {{{
-  {
-    static $E0='incorrect delay, less than zero';
-    static $E1='incorrect delay, greater than maximum';
-    if ($ms < 0) {
-      return ErrorEx::fail($E0, $ms);
-    }
-    if ($ms > self::MAX_DELAY) {
-      return ErrorEx::fail($E1, $ms);
-    }
-    return null;# good
-  }
-  # }}}
-  function __construct(# {{{
     public int     $delay,
-    public ?object $action
-  ) {
-    ErrorEx::peep(self::check($delay));
-  }
-  # }}}
-  function _complete(): ?object # {{{
+    public ?object $todo
+  ) {}
+  function _complete(): bool
   {
-    # delay once
-    if ($ms = $this->delay)
-    {
-      $this->delay = 0;
-      return self::$THEN->wait($ms);
+    switch ($this->stage) {
+    case 1:
+      $this->stage = 2;
+      $this->result->promiseDelay($this->delay);
+      return false;
+    case 2:
+      $this->stage = 1;
+      if ($o = $this->todo) {
+        $this->result->promiseInject($o);
+      }
+      $this->result->promiseNoDelay();
+      break;
     }
-    # continue
-    return self::$THEN->hop($this->action);
+    return true;
   }
-  # }}}
 }
 # }}}
 # }}}
-# action groups {{{
+# groups {{{
 abstract class PromiseGroup extends Reversible # {{{
 {
   public ?array $_reverse=null;
@@ -1104,14 +1168,14 @@ class PromiseColumn extends PromiseGroup # {{{
     }
   }
   # }}}
-  function _complete(): ?object # {{{
+  function _complete(): bool # {{{
   {
     # prepare
     $q = &$this->group;
     $i = &$this->idx;
     # check finished
     if ($i >= ($j = $this->cnt)) {
-      return null;
+      return true;
     }
     # initialize
     if ($i < 0)
@@ -1123,11 +1187,10 @@ class PromiseColumn extends PromiseGroup # {{{
       $p->_init($q[$i - 1]->result);
     }
     # execute
-    if (!($r = $p->_execute()))
+    if ($p->_execute())
     {
-      return $p->_idle
-        ? self::$THEN->idle($p->_idle)
-        : $this;
+      $this->result->promise->_time = $p->_time;
+      return false;
     }
     # one complete,
     # collect reversible
@@ -1136,19 +1199,18 @@ class PromiseColumn extends PromiseGroup # {{{
     if (++$i >= $j)
     {
       $this->result->_columnEnd($i);
-      return null;
+      return true;
     }
     # check breakable failed
-    if ($this->break && !$r->ok)
+    if ($this->break && !$p->result->ok)
     {
       if (--$this->break) {
         return $this;# more to break
       }
       $this->_cancel();
-      return null;
+      return true;
     }
-    # continue
-    return $this;
+    return false;
   }
   # }}}
 }
@@ -1179,14 +1241,15 @@ class PromiseRow extends PromiseGroup # {{{
     }
   }
   # }}}
-  function _complete(): ?object # {{{
+  function _complete(): bool # {{{
   {
     # prepare
+    $t = Loop::$HRTIME;
     $q = &$this->group;
     $i = &$this->idx;
     # check finished
     if ($i >= ($j = $this->cnt)) {
-      return null;
+      return true;
     }
     # initialize
     if ($i < 0)
@@ -1199,42 +1262,42 @@ class PromiseRow extends PromiseGroup # {{{
     }
     # to enter idle state, the number of idle items and
     # the closest idle timeout must be determined
-    $idleTime = self::$HRTIME + Loop::MAX_TIMEOUT;
-    $idleCnt  = 0;
+    $idleStop = Loop::$HRTIME + 999999999;# ~1s
+    $idleCnt  = $j;
     # execute all
     for ($k=0; $k < $j; ++$k)
     {
       # checkout
-      if (!($p = $q[$k]))
-      {
-        $idleCnt++;
+      if (!($p = $q[$k])) {
         continue;
       }
-      # execute
-      if (!($r = $p->_execute()))
+      if ($p->_time > $t)
       {
-        if ($p->_idle)
-        {
-          $idleCnt++;
-          if ($idleTime > $p->_idle) {
-            $idleTime = $p->_idle;
-          }
+        if ($idleStop > $p->_time) {
+          $idleStop = $p->_time;
         }
         continue;
       }
+      # execute
+      if ($p->_execute())
+      {
+        $idleCnt--;
+        continue;
+      }
       # one complete
-      $q[$k] = $this->result->_rowDone($r, $k, ++$i);
-      $idleCnt++;
+      $q[$k] = $this->result->_rowDone(
+        $p->result, $k, ++$i
+      );
       # collect reversibles
       $p->_reverse && $this->_reverseAdd($p);
       # check break condition
-      if ($this->break && !$r->ok)
+      if ($this->break && !$p->result->ok)
       {
         if (--$this->break) {
           continue;# more to break
         }
         $this->_cancel();
-        return null;
+        return true;
       }
       # check race condition
       if ($this->first)
@@ -1243,25 +1306,27 @@ class PromiseRow extends PromiseGroup # {{{
           continue;# more to come
         }
         $this->_cancel();
-        return null;
+        return true;
       }
     }
-    # complete idle, active or finished
-    return ($i < $j)
-      ? (($idleCnt === $j)
-        ? self::$THEN->idle($idleTime)
-        : $this)
-      : null;
+    # check finished
+    if ($i === $j) {
+      return true;
+    }
+    # check idle
+    if ($idleCnt === $j) {
+      $this->result->promiseWakeup($idleStop);
+    }
+    return false;
   }
   # }}}
 }
 # }}}
 # }}}
-# result {{{
-class PromiseResult
+class PromiseResult # {{{
   implements ArrayAccess,Loggable
 {
-  # constructor {{{
+  # basis {{{
   const
     IS_INFO    = 0,
     IS_WARNING = 1,
@@ -1272,22 +1337,29 @@ class PromiseResult
     IS_FUSION  = 6,# all => fuse track
     IS_CANCELLATION = 9;# all => cancellation track
   ###
-  public ?object $context=null;
-  public int     $time,$status=0;
+  public ?object $promise=null;
+  public int     $time=PHP_INT_MAX,$index=0;
   public object  $track;
-  public bool    $ok;
-  public array   $store=[null];
+  public bool    $ok=true,$isCancelled=false;
+  public array   $store;
   public mixed   $value;
   ###
-  function __construct(?array &$x=null)
+  function __construct(?array $x=null)
   {
-    $this->time  = Completable::$TIME;
+    $this->_init();
+    $x && $this->value = $x;
+  }
+  function _init(): void
+  {
+    $this->time  = Loop::$TIME;
+    $this->index = 0;
     $this->track = new PromiseResultTrack();
     $this->ok    = &$this->track->ok;
-    $this->setRef($x);
+    $this->store = [null];
+    $this->value = &$this->store[0];
   }
   # }}}
-  # hlp {{{
+  # util {{{
   function __debugInfo(): array # {{{
   {
     return [
@@ -1326,9 +1398,11 @@ class PromiseResult
   # }}}
   function _track(): object # {{{
   {
-    if ($this->status || !$this->track->title) {
-      return $this->track;
+    # check finished or doesnt have title yet
+    if (!$this->promise || !$this->track->title) {
+      return $this->track;# use current track
     }
+    # create new track
     $t = new PromiseResultTrack($this->track);
     $this->track = $t;
     $this->ok = &$t->ok;
@@ -1339,8 +1413,7 @@ class PromiseResult
   {
     $r = new PromiseResult($this->store);
     $this->_track()->trace[] = [
-      self::IS_COLUMN, $r, 0, $total,
-      Completable::$HRTIME
+      self::IS_COLUMN, $r, 0, $total, Loop::$HRTIME
     ];
     return $r;
   }
@@ -1352,13 +1425,13 @@ class PromiseResult
     $r = $e[1];
     $e[1] = $r->track;
     $e[2] = $done;
-    $e[4] = Completable::$HRTIME - $e[4];
+    $e[4] = Loop::$HRTIME - $e[4];
     ###
     if (!$r->ok && $this->ok) {
       $this->ok = false;
     }
     array_pop($r->store);
-    $this->extend()->setRef($r->store);
+    $this->valuePut($r->store);
   }
   # }}}
   function _row(array &$q, int $total): int # {{{
@@ -1367,10 +1440,9 @@ class PromiseResult
       $v[$i] = &$q[$i]->result->store;
     }
     $this->_track()->trace[] = [
-      self::IS_ROW, [], 0, $total,
-      Completable::$HRTIME
+      self::IS_ROW, [], 0, $total, Loop::$HRTIME
     ];
-    $this->extend()->setRef($v);
+    $this->valuePut($v);
     return 0;
   }
   # }}}
@@ -1386,7 +1458,7 @@ class PromiseResult
     $e[2]++;
     # determine total duration at last completion
     if ($n >= $e[3]) {
-      $e[4] = Completable::$HRTIME - $e[4];
+      $e[4] = Loop::$HRTIME - $e[4];
     }
     # change current state upon failure
     if (!$r->ok && $this->ok) {
@@ -1408,49 +1480,27 @@ class PromiseResult
         array_pop($this->value[$i]);
       }
     }
-    $e[4] = Completable::$HRTIME - $e[4];
+    $e[4] = Loop::$HRTIME - $e[4];
     return $total;
-  }
-  # }}}
-  function _fuse(): self # {{{
-  {
-    if (!($t0 = $this->track)->title) {
-      $t0->span = Completable::$HRTIME - $t0->span;
-    }
-    $t1 = new PromiseResultTrack();
-    $this->track = $t1;
-    $this->ok    = &$t1->ok;
-    $t1->trace[] = [self::IS_FUSION, $t0];
-    return $this;
   }
   # }}}
   function _cancel(): self # {{{
   {
     if (!($t0 = $this->track)->title) {
-      $t0->span = Completable::$HRTIME - $t0->span;
+      $t0->span = Loop::$HRTIME - $t0->span;
     }
     $t1 = new PromiseResultTrack(null, false);
-    $this->track  = $t1;
-    $this->ok     = &$t1->ok;
-    $this->status = -1;
-    $t1->trace[]  = [self::IS_CANCELLATION, $t0];
+    $t1->trace[] = [self::IS_CANCELLATION, $t0];
+    $this->track = $t1;
+    $this->ok    = &$t1->ok;
+    $this->isCancelled = true;
     return $this;
   }
   # }}}
-  function _done(object $p): self # {{{
+  function _done(): self # {{{
   {
-    if (!$this->track->title) {
-      $this->confirm('{}');
-    }
-    if ($this->context)
-    {
-      $this->context->_done();
-      $this->context = null;
-    }
-    if (!$this->status) {
-      $this->status = 1;
-    }
-    $p->_done && ($p->_done)($this);
+    $this->track->title || $this->confirm('{}');
+    $this->promise = null;
     return $this;
   }
   # }}}
@@ -1671,59 +1721,86 @@ class PromiseResult
   }
   # }}}
   # }}}
-  # api {{{
-  function extend(): self # {{{
+  # base controls {{{
+  function __call(string $method, array $args): mixed # {{{
   {
-    array_unshift($this->store, null);
-    $this->value = &$this->store[0];
+    # interface to contextable
+    if (!$this->ok)
+    {
+      throw ErrorEx::fatal(
+        "unable to invoke `".$method."` method\n".
+        "result is in a failed state"
+      );
+    }
+    if (!($o = $this->promise->_context))
+    {
+      throw ErrorEx::fatal(
+        "unable to invoke `".$method."` method\n".
+        "context is not attached"
+      );
+    }
+    return $o->$method(...$args);
+  }
+  # }}}
+  function reset(): self # {{{
+  {
+    if (!($p = $this->promise))
+    {
+      throw ErrorEx::fatal(
+        "cannot reset a finished state"
+      );
+    }
+    if (!$this->ok)
+    {
+      throw ErrorEx::fatal(
+        "cannot reset a failed state"
+      );
+    }
+    $p->_context && $p->_context->_reset();
+    $this->_init();
     return $this;
   }
   # }}}
-  function setRef(mixed &$value): self # {{{
-  {
-    $this->store[0] = &$value;
-    $this->value    = &$this->store[0];
-    return $this;
-  }
-  # }}}
-  function set(mixed $value): self # {{{
-  {
-    return $this->extend()->setRef($value);
-  }
-  # }}}
-  function info(...$msg): void # {{{
+  function info(...$msg): self # {{{
   {
     $this->_track()->trace[] = [
       self::IS_INFO, ErrorEx::stringify($msg)
     ];
+    return $this;
   }
   # }}}
-  function warn(...$msg): void # {{{
+  function warn(...$msg): self # {{{
   {
     $this->_track()->trace[] = [
       self::IS_WARNING, ErrorEx::stringify($msg)
     ];
+    return $this;
   }
   # }}}
-  function fail(...$msg): void # {{{
+  function fail(...$msg): self # {{{
   {
     $this->_track()->trace[] = [
       self::IS_FAILURE, ErrorEx::stringify($msg)
     ];
     $this->ok = false;
+    return $this;
   }
   # }}}
-  function error(object $e): void # {{{
+  function error(object $e): self # {{{
   {
-    $this->_track()->trace[] = [
-      self::IS_ERROR, ErrorEx::set($e)
-    ];
-    if ($e->hasError() && $this->ok) {
-      $this->ok = false;
+    if ($e = ErrorEx::from($e, true))
+    {
+      $this->_track()->trace[] = [
+        self::IS_ERROR, $e
+      ];
+      if ($this->ok && $e->hasError()) {
+        $this->ok = false;
+      }
     }
+    return $this;
   }
   # }}}
-  function confirm(...$msg): void # {{{
+  function confirm(...$msg): self # {{{
   {
     if (($t = $this->_track())->title) {
       $t->title = ErrorEx::stringify($msg);
@@ -1731,22 +1808,156 @@ class PromiseResult
     else
     {
       $t->title = ErrorEx::stringify($msg);
-      $t->span  = Completable::$HRTIME - $t->span;
+      $t->span  = Loop::$HRTIME - $t->span;
     }
+    return $this;
+  }
+  # }}}
+  # }}}
+  # specific controls {{{
+  function promiseDelay(int $ms): self # {{{
+  {
+    # set delay in milliseconds
+    $this->promise->_time = 
+      Loop::$HRTIME + (int)($ms * 1000000);
+    ###
+    return $this;
+  }
+  # }}}
+  function promiseDelayNs(int $ns): self # {{{
+  {
+    # set delay in nanoseconds
+    $this->promise->_time = Loop::$HRTIME + $ns;
+    return $this;
+  }
+  # }}}
+  function promiseIdle(): self # {{{
+  {
+    # TODO: improve based on recent activity/stats
+    # TODO: improve based on CPU caps
+    # set relaxed waiting
+    $this->promise->_time =
+      Loop::$HRTIME + 70*1000000;# ms
+    ###
+    return $this;
+  }
+  # }}}
+  function promiseHalt(): self # {{{
+  {
+    $this->promise->_time = PHP_INT_MAX;
+    return $this;
+  }
+  # }}}
+  function promiseWakeup(int $hrtime=1): self # {{{
+  {
+    # set exact time to wakeup
+    $this->promise->_time = $hrtime;
+    return $this;
+  }
+  # }}}
+  function promiseNoDelay(): void # {{{
+  {
+    $this->promise->_time = 0;
+  }
+  # }}}
+  function promiseInject(object $o): void # {{{
+  {
+    if ($o instanceof Promise) {
+      $this->promise->_queueInject($o);
+    }
+    else
+    {
+      $this->promise->_queueInjectOne(
+        Completable::from($o)
+      );
+    }
+  }
+  # }}}
+  function promiseContextSet(object $o, int $t=1): self # {{{
+  {
+    $p = $this->promise;
+    if ($p->_context && $p->_context !== $o) {
+      $p->_context->_done();
+    }
+    $p->_context = $o;
+    $p->_time    = $t;
+    return $this;
+  }
+  # }}}
+  function promiseContextClear(object $o): void # {{{
+  {
+    $p = $this->promise;
+    if ($p->_context === $o) {
+      $p->_context = null;
+    }
+  }
+  # }}}
+  function promiseFuse(object $o): void # {{{
+  {
+    # settle current track timespan
+    if (!($track = $this->track)->title) {
+      $track->span = Loop::$HRTIME - $track->span;
+    }
+    # create new and replace current track
+    $this->track = $track = new PromiseResultTrack(
+      null, true, [[self::IS_FUSION, $track]]
+    );
+    $this->ok = &$track->ok;
+    # set nodelay and replace queue
+    $this->promise->_time = 0;
+    $this->promise->_queueTruncate();
+    $this->promiseInject($o);
+  }
+  # }}}
+  function promisePrepend(object $o): self # {{{
+  {
+    $this->promise->_queuePrepend($o);
+    return $this;
+  }
+  # }}}
+  function promisePrependOne(object $o): self # {{{
+  {
+    $this->promise->_queuePrependOne($o);
+    return $this;
+  }
+  # }}}
+  function promiseCancel(): void # {{{
+  {
+    $this->promise->cancel();
+  }
+  # }}}
+  function valueSet(mixed $value): self # {{{
+  {
+    $this->value = $value;
+    return $this;
+  }
+  # }}}
+  function valuePut(mixed $v=null): self # {{{
+  {
+    array_unshift($this->store, $v);
+    $this->value = &$this->store[0];
+    return $this;
+  }
+  # }}}
+  function indexPlus(int $i=1): self # {{{
+  {
+    $this->index += $i;
+    return $this;
   }
   # }}}
   # }}}
 }
 class PromiseResultTrack
 {
-  function __construct(# {{{
+  # constructor {{{
+  public int $span;
+  function __construct(
     public ?object $prev  = null,
     public bool    $ok    = true,
-    public ?array  $title = null,
     public array   $trace = [],
-    public int     $span  = 0
+    public ?array  $title = null
   ) {
-    $this->span = Completable::$HRTIME;
+    $this->span = Loop::$HRTIME;
   }
   # }}}
   function __debugInfo(): array # {{{
@@ -1768,88 +1979,5 @@ class PromiseResultTrack
   # }}}
 }
 # }}}
-# continuator {{{
-if (!isset(Completable::$THEN))
-{
-  Completable::$THEN = new class() extends PromiseNop
-  {
-    const DEF_DELAY = 50000000;# 50ms in nano
-    public int     $id=0,$time=0;
-    public ?object $action=null;
-    # setters
-    function wait(int $ms=0): object # {{{
-    {
-      $this->id = 1;
-      $this->time = self::$HRTIME + ($ms
-        ? (int)($ms * 1000000) # milli => nano
-        : self::DEF_DELAY
-      );
-      return $this;
-    }
-    # }}}
-    function nanowait(int $ns): object # {{{
-    {
-      $this->id = 1;
-      $this->time = self::$HRTIME + $ns;
-      return $this;
-    }
-    # }}}
-    function idle(int $ns): self # {{{
-    {
-      $this->id = 1;
-      $this->time = $ns;
-      return $this;
-    }
-    # }}}
-    function hop(?object $action=null): self # {{{
-    {
-      if ($action)
-      {
-        $this->id = 3;
-        $this->action = $action;
-      }
-      else {
-        $this->id = 2;
-      }
-      return $this;
-    }
-    # }}}
-    function fuse(object $action): self # {{{
-    {
-      $this->id = 4;
-      $this->action = $action;
-      return $this;
-    }
-    # }}}
-    function abort(): self # {{{
-    {
-      $this->id = 5;
-      return $this;
-    }
-    # }}}
-    function done(): self # {{{
-    {
-      $this->id = 6;
-      return $this;
-    }
-    # }}}
-    # getters
-    function getId(): int # {{{
-    {
-      $id = $this->id;
-      $this->id = 0;
-      return $id;
-    }
-    # }}}
-    function getAction(): object # {{{
-    {
-      $a = $this->action;
-      $this->action = null;
-      return $a;
-    }
-    # }}}
-  };
-}
-# }}}
-return Loop::init();
+Loop::_init();
 ###

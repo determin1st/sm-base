@@ -1,11 +1,12 @@
 <?php declare(strict_types=1);
 # defs {{{
 namespace SM;
-use FFI,SplDoublyLinkedList,Throwable;
+use FFI,Throwable,SplDoublyLinkedList;
 use function
   class_exists,hrtime,chr,ord,bin2hex,hex2bin,hexdec,
   str_repeat,strlen,substr,strpos,
   preg_match,preg_match_all,count,explode,
+  array_merge,array_slice,array_search,array_splice,
   getenv,ob_start,ob_get_level,ob_end_flush;
 ###
 use const DIRECTORY_SEPARATOR;
@@ -22,13 +23,12 @@ class Conio # {{{
   # TODO: default color management/info api
   const # {{{
     # event types {{{
-    EV_GROUP  = 0x00,# timeout,count
+    EV_ERROR  = 0x00,# ErrorEx
     EV_KEY    = 0x01,# state,keycode,modifier,char
     EV_MOUSE  = 0x02,# button-state,modifier,x,y
     EV_RESIZE = 0x03,# new-size,old-size
     EV_SCROLL = 0x04,# new-scroll,old-scroll
     EV_FOCUS  = 0x05,# state
-    EV_ERROR  = 0xFF,# ErrorEx
     # }}}
     # virtual key codes {{{
     K_LBUTTON    = 0x01,
@@ -502,13 +502,13 @@ class Conio # {{{
     # }}}
   # }}}
   # initializer {{{
-  static ?object $BASE=null;
+  static ?object $GEAR=null;
   private function __construct()
   {}
-  static function init(array $o=[]): ?object
+  static function init(): ?object
   {
     # check already constructed
-    if (self::$BASE) {
+    if (self::$GEAR) {
       return null;
     }
     # check requirements
@@ -519,446 +519,395 @@ class Conio # {{{
       );
     }
     # construct OS-specific instance and
-    # add the gear of asynchronicity
+    # the gear of asynchronicity
     try
     {
-      self::$BASE = ConioBase::new();
-      Loop::gear(new ConioGear(self::$BASE));
+      self::$GEAR = $e = Loop::gear(
+        new Conio_Gear(Conio_Base::new())
+      );
+      ErrorLog::set(['ansi' => $e->base->ansi]);
       $e = null;
     }
-    catch (Throwable $e)
-    {
+    catch (Throwable $e) {
       $e = ErrorEx::from($e);
-      self::$BASE = null;
     }
     return $e;
   }
   # }}}
   # informational {{{
   static function id(): string {
-    return self::$BASE->id;
+    return self::$GEAR->base->id;
   }
   static function is_ansi(): bool {
-    return !!self::$BASE->ansi;
+    return !!self::$GEAR->base->ansi;
   }
   static function has_colors(): int {
-    return self::$BASE->colors;
+    return self::$GEAR->base->colors;
   }
   static function has_8bits(): bool {
-    return !!self::$BASE->s8c1t;
+    return !!self::$GEAR->base->s8c1t;
   }
   static function is_unicode(): bool {
-    return !!self::$BASE->unicode;
+    return !!self::$GEAR->base->unicode;
   }
   static function is_mouse(): int {
-    return self::$BASE->mouse;
+    return self::$GEAR->base->mouse;
   }
   static function is_keyboard(): int {
-    return self::$BASE->keyboard;
+    return self::$GEAR->base->keyboard;
   }
   static function is_async(): bool {
-    return !!self::$BASE->async;
+    return !!self::$GEAR->base->async;
   }
   static function dev_src(): string {
-    return self::$BASE->devPath;
+    return self::$GEAR->base->devPath;
   }
   static function dev_attr(): string {
-    return self::$BASE->devAttr;
+    return self::$GEAR->base->devAttr;
   }
   static function dev_id(): string {
-    return self::$BASE->devId;
+    return self::$GEAR->base->devId;
   }
   static function is_focused(): bool {
-    return !!self::$BASE->focused;
+    return !!self::$GEAR->base->focused;
   }
   static function get_size(): array {
-    return self::$BASE->size;
+    return self::$GEAR->base->size;
   }
   # }}}
-  # api {{{
-  static function read(): object
-  {
-    return Promise::Context(
-      new ConioReadEvents(self::$BASE)
-    );
+  # promise factory {{{
+  static function drain(): object {
+    return new Promise(new Conio_DrainOp(self::$GEAR));
   }
-  static function readch(int $n=1): object
+  static function read(): object {
+    return new Promise(new Conio_ReadOp(self::$GEAR));
+  }
+  static function readch(): object
   {
     return new Promise(
-      new ConioReadChars(self::$BASE, $n)
+      new Conio_ReadChar(self::$GEAR)
     );
   }
-  static function drain(): object
-  {
-    return new Promise(
-      new ConioWriteComplete(self::$BASE)
-    );
+  static function clear(): void {
+    self::$GEAR->base->clearOutput();
   }
   # }}}
 }
 # }}}
-# gears {{{
-class ConioGear extends Completable # {{{
+class Conio_Gear extends Completable # {{{
 {
-  const RESIZE_INTERVAL=333*1000000;
-  public int $lastActive,$nextResize;
+  # basis {{{
+  const
+    WRITE_INTERVAL  = 33*1000000,# 33ms~30fps,16ms~60fps
+    RESIZE_INTERVAL = 333*1000000;
+  ###
+  public array
+    $readers=[],$drainers=[],$events;
+  public int
+    $readerCount=0,$drainerCount=0,
+    $lastActive,$nextWrite,$nextResize;
+  ###
   function __construct(
-    public ?object &$base
+    public ?object $base
   ) {
-    $this->lastActive = $t = self::$HRTIME;
+    $this->lastActive = $t = Loop::$HRTIME;
+    $this->nextWrite  = $t + self::WRITE_INTERVAL;
     $this->nextResize = $t + self::RESIZE_INTERVAL;
   }
-  function _cancel(): void
+  # }}}
+  function _complete(): bool # {{{
   {
-    $this->base->__destruct();
-    $this->base = null;
-  }
-  function _complete(): ?object
-  {
-    static $i=3,$WAIT=[# ms
-      96*1000000,
-      32*1000000,
-      16*1000000,
-      8*1000000
+    # prepare
+    static $i=3,$WAIT=[# ms ~ ns
+      96*1000000,# relaxed
+      32*1000000,# active
+      16*1000000,# active
+      8*1000000  # active!
     ];
-    static $SPAN=[# sec
-      0, 90*1000000000,
+    static $SPAN=[# s ~ ns
+      0,# forever/not used
+      90*1000000000,
       30*1000000000,
       10*1000000000
     ];
-    # prepare
-    $time = self::$HRTIME;
-    $base = $this->base;
-    # decompose event groups
-    if (($n = $base->pending) &&
-        $time >= $base->events[0][1])
+    # work
+    if ($this->dispatch())
     {
-      # decompose until fresh
-      $q = $base->events;
-      do
-      {
-        $k = $q->shift()[2];# group size
-        $n = $n - $k - 1;# substract events + group
-        do {
-          $q->shift();
-        }
-        while (--$k);
-      }
-      while ($n && $time >= $q[0][1]);
-      # update counter
-      $base->pending = $n;
-    }
-    # write output
-    if ($n = $base->writeLen1) {
-      $base->write();
-    }
-    # poll resize/scroll change
-    if ($time >= $this->nextResize)
-    {
-      $base->resize($time);
-      $this->nextResize =
-        $time + self::RESIZE_INTERVAL;
-    }
-    # read new input and check active
-    if ($base->read($time) || $n)
-    {
-      $this->lastActive = $time;
-      return self::$THEN->nanowait(
-        $base->delay = $WAIT[$i = 3]
-      );
+      $this->result->promiseDelayNs($WAIT[$i = 3]);
+      return false;
     }
     # unfocused?
-    if (!$base->focused)
+    if (!$this->base->focused)
     {
-      return self::$THEN->nanowait(
-        $base->delay = self::RESIZE_INTERVAL
+      $this->result->promiseDelayNs(
+        self::RESIZE_INTERVAL
       );
+      return false;
     }
     # active waiting?
     if ($i)
     {
-      $time -= $this->lastActive;
+      $t = Loop::$HRTIME - $this->lastActive;
       do
       {
-        if ($time < $SPAN[$i])
+        if ($t < $SPAN[$i])
         {
-          return self::$THEN->nanowait(
-            $base->delay = $WAIT[$i]
-          );
+          $this->result->promiseDelayNs($WAIT[$i]);
+          return false;
         }
       }
       while (--$i);
     }
     # relaxed waiting
-    return self::$THEN->nanowait(
-      $base->delay = $WAIT[0]
-    );
-  }
-}
-# }}}
-abstract class ConioReader extends Contextable # {{{
-{
-  public int $_stage=0;
-  function _wait(): object # {{{
-  {
-    # wait in sync with the gear,
-    # the gear executes and sets pending state,
-    # then other readers may consume the input
-    return self::$THEN->nanowait(
-      $this->_base->delay
-    );
-  }
-  # }}}
-  function _lock(): object # {{{
-  {
-    # locking prevents other readers
-    # from consuming input events
-    return $this->_base->setRead($this)
-      ? $this->_enter()
-      : $this->_wait();
-  }
-  # }}}
-  function _done(): void # {{{
-  {
-    if ($this->_stage)
-    {
-      $this->_base->setRead();
-      $this->_stage = 0;
-    }
+    $this->result->promiseDelayNs($WAIT[0]);
+    return false;
   }
   # }}}
   function _cancel(): void # {{{
   {
-    $this->_done();
+    if ($this->readerCount)
+    {
+      foreach ($this->readers as $o) {
+        $o->_cancel();
+      }
+    }
+    if ($this->drainerCount)
+    {
+      foreach ($this->drainers as $o) {
+        $o->_cancel();
+      }
+    }
+    $this->base->__destruct();
+    $this->base = null;
   }
   # }}}
-  function _complete(): ?object # {{{
+  function attachReader(object $o): void # {{{
   {
-    return match ($this->_stage) {
-      0 => $this->_lock(),
-      1 => $this->_dispatch(),
-      default => null
+    $this->readers[] = $o;
+    $this->readerCount++;
+  }
+  # }}}
+  function attachDrainer(object $o): void # {{{
+  {
+    $this->drainers[] = $o;
+    $this->drainerCount++;
+  }
+  # }}}
+  function detachReader(object $o): void # {{{
+  {
+    $i = array_search($o, $this->readers, true);
+    if ($i !== false)
+    {
+      array_splice($this->readers, $i, 1);
+      $this->readerCount--;
+    }
+  }
+  # }}}
+  function detachDrainer(object $o): void # {{{
+  {
+    $i = array_search($o, $this->drainers, true);
+    if ($i !== false)
+    {
+      array_splice($this->drainers, $i, 1);
+      $this->drainerCount--;
+    }
+  }
+  # }}}
+  function dispatch(): bool # {{{
+  {
+    # refresh event storage
+    $time = Loop::$HRTIME;
+    $base = $this->base->refresh($time);
+    $wrote = false;
+    # write output
+    if ($base->writeLen1)
+    {
+      # debounce
+      if ($time > $this->nextWrite)
+      {
+        $base->write();
+        $this->lastActive = $time;
+        $this->nextWrite  = $time + self::WRITE_INTERVAL;
+        $wrote = true;
+      }
+    }
+    elseif ($this->drainerCount && !$base->writing)
+    {
+      # wakeup drainers
+      foreach ($this->drainers as $o) {
+        $o->result->promiseNoDelay();
+      }
+      $this->drainers = [];
+      $this->drainerCount = 0;
+    }
+    # resize
+    if ($time >= $this->nextResize)
+    {
+      $resized = $base->resize();
+      $this->nextResize =
+        $time + self::RESIZE_INTERVAL;
+    }
+    else {
+      $resized = false;
+    }
+    # read
+    if (($base->read() || $resized) &&
+        $this->readerCount)
+    {
+      # get events and wakeup event readers
+      $this->events = $base->getEvents();
+      foreach ($this->readers as $o) {
+        $o->result->promiseWakeup();
+      }
+      # cleanup and complete
+      $this->readers = [];
+      $this->readerCount = 0;
+      $this->lastActive = $time;
+      return true;
+    }
+    # complete
+    return $wrote;
+  }
+  # }}}
+}
+# }}}
+class Conio_DrainOp extends Completable # {{{
+{
+  public $stage=1;
+  function __construct(
+    public object $gear
+  ) {}
+  function _complete(): bool
+  {
+    switch ($this->stage) {
+    case 1:
+      $this->gear->attachDrainer($this);
+      $this->result->promiseHalt();
+      $this->stage++;
+      return false;
+    case 2:
+      $this->stage++;
+      break;
+    }
+    return true;
+  }
+  function _cancel(): void
+  {
+    if ($this->stage)
+    {
+      if ($this->stage === 2) {
+        $this->gear->detachDrainer($this);
+      }
+      $this->stage = 0;
+    }
+  }
+}
+# }}}
+class Conio_ReadOp extends Contextable # {{{
+{
+  # basis {{{
+  public int $stage=1;
+  function __construct(
+    public object $gear
+  ) {}
+  # }}}
+  function _complete(): bool # {{{
+  {
+    return match ($this->stage) {
+      1 => $this->_enter(),
+      2 => $this->_leave(),
+      default => true
     };
   }
   # }}}
-  function read(): object # {{{
+  function _done(): bool # {{{
   {
-    if ($this->_stage !== 2)
+    if ($this->stage)
     {
-      throw ErrorEx::warn(static::class,
-        "unable to continue reading\n".
-        "incorrect stage=".$this->_stage
-      );
+      if ($this->stage === 2) {
+        $this->gear->detachReader($this);
+      }
+      $this->result->promiseContextClear($this);
+      $this->stage = 0;
     }
-    # the reader is already aquired the lock,
-    # start dispathing
-    $this->_stage = 1;
-    return Promise::Context($this);
+    return true;
   }
   # }}}
-  abstract function _enter(): object;
-  abstract function _dispatch(): ?object;
-}
-# }}}
-class ConioReadEvents extends ConioReader # {{{
-{
-  # constructor {{{
-  public array $events;
-  public int   $count;
-  function __construct(
-    public object $_base
-  ) {}
-  # }}}
-  function _enter(): object # {{{
+  function _enter(): bool # {{{
   {
-    # initialize and move to the next stage
-    $this->events = [];
-    $this->count  = 0;
-    $this->_stage++;
-    return $this;
+    $this->gear->attachReader($this);
+    $this->result
+      ->promiseContextSet($this)
+      ->promiseHalt();
+    ###
+    $this->stage++;
+    return false;
   }
   # }}}
-  function _dispatch(): ?object # {{{
+  function _leave(): bool # {{{
   {
-    # prepare
-    $base = $this->_base;
-    $q = $base->events;
-    $a = &$this->events;
-    $k = &$this->count;
-    # collect code/key/mouse events
-    if ($n = $base->pending)
-    {
-      # collect
-      do
-      {
-        if (($e = $q->shift())[0])
-        {
-          $a[] = $e;
-          $k++;
-        }
-      }
-      while (--$n);
-      # reset counter
-      $base->pending = 0;
-    }
-    # check resized or scrolled
-    if ($b = $base->lastSize)
-    {
-      # add resize event
-      if ($b !== $base->size)
-      {
-        $a[] = [Conio::EV_RESIZE, $base->size, $b];
-        $k++;
-      }
-      # invalidate previous size and scroll
-      $base->lastSize = $base->lastScroll = null;
-    }
-    elseif ($b = $base->lastScroll)
-    {
-      # add scroll event
-      if ($b !== $base->lastScroll)
-      {
-        $a[] = [Conio::EV_SCROLL, $base->scroll, $b];
-        $k++;
-      }
-      # invalidate previous scroll
-      $base->lastScroll = null;
-    }
-    # check focused
-    if (($c = $base->lastFocused) >= 0)
-    {
-      # add focus event
-      if ($c !== $base->focused)
-      {
-        $a[] = [Conio::EV_FOCUS, $base->focused];
-        $k++;
-      }
-      # invalidate previous focus state
-      $base->lastFocused = -1;
-    }
-    # complete
-    if ($k)
-    {
-      $this->result->value = $this;
-      $this->_stage++;
-      return null;
-    }
-    # retry
-    return $this->_wait();
+    $this->result
+      ->valueSet($this->gear->events)
+      ->promiseNoDelay();
+    ###
+    $this->stage++;
+    return true;
+  }
+  # }}}
+  function consume(int $index): void # {{{
+  {
+    array_splice($this->gear->events, $index, 1);
+  }
+  # }}}
+  function resume(): object # {{{
+  {
+    $this->stage = 1;
+    return $this->result
+      ->valueSet(null)
+      ->promisePrependOne($this);
   }
   # }}}
 }
 # }}}
-class ConioReadChars extends ConioReader # {{{
+class Conio_ReadChar extends Conio_ReadOp # {{{
 {
-  # constructor {{{
-  public string $chars;
-  public int    $count;
-  function __construct(
-    public object $_base,
-    public int    $_count
-  ) {}
-  # }}}
-  function _enter(): object # {{{
+  function _leave(): bool # {{{
   {
-    $this->chars = '';
-    $this->count = 0;
-    $this->_stage++;
-    return $this;
-  }
-  # }}}
-  function _dispatch(): ?object # {{{
-  {
-    # check pending events
-    $base = $this->_base;
-    if (!($n = $base->pending)) {
-      return $this->_wait();
-    }
-    # collect characters
-    $q = $base->events;
-    $s = &$this->chars;
-    $c = &$this->count;
-    $d = $this->_count;
-    do
+    # find first character in the input
+    foreach ($this->gear->events as $i => $e)
     {
-      # shift one
-      $e = $q->shift();
-      $n--;
       # skip non-characters
       if ($e[0] !== Conio::EV_KEY ||
-          ($a = $e[1]) === 0 ||
-          ($b = $e[4]) === '')
+          $e[1] === 0 || ($c = $e[4]) === '')
       {
         continue;
       }
-      # check repeat
-      if ($a > 1)
-      {
-        # correct overflow
-        if ($c + $a > $d) {
-          $a = $d - $c;
-        }
-        # grow
-        $b = str_repeat($b, $a);
-      }
-      # accumulate
-      $s .= $b;
-      $c += $a;
-      # check complete
-      if ($c === $d)
-      {
-        # cut remaining events til the next group
-        while ($n && $q[0][0] !== Conio::EV_GROUP)
-        {
-          $q->shift();
-          $n--;
-        }
-        # complete
-        $base->pending = $n;
-        $base->setRead();
-        $this->result->value = $s;
-        $this->_stage++;
-        return null;
-      }
+      # consume one and complete
+      array_splice($this->gear->events, $i, 1);
+      $this->result
+        ->valueSet($c)
+        ->promiseNoDelay();
+      ###
+      $this->stage++;
+      return true;
     }
-    while ($n);
-    # incomplete
-    $base->pending = 0;
-    return $this->_wait();
+    # no characters in the input, retry
+    $this->stage--;
+    return $this->_enter();
   }
   # }}}
-}
-# }}}
-class ConioWriteComplete extends Completable # {{{
-{
-  function __construct(
-    public object $_base
-  ) {}
-  function _complete(): ?object
+  function consume(int $index): void # {{{
   {
-    $base = $this->_base;
-    return ($base->writeLen1 || $base->writing > 0)
-      ? self::$THEN->nanowait($base->delay)
-      : null;
-  }
-}
-# }}}
-class ConioHlp implements Mustachable # {{{
-{
-  # TODO
-  const STASH = [# {{{
-    'title' => 7+1,
-  ];
-  # }}}
-  function title(object $m, string $a): string # {{{
-  {
-    return "\x1B]2;".$a."\x1B\\";
+    throw ErrorEx::fatal(
+      __CLASS__, __FUNCTION__,
+      "character is consumed automatically\n".
+      "please dont use this method"
+    );
   }
   # }}}
 }
 # }}}
-# }}}
-abstract class ConioPseudo
+abstract class Conio_PseudoBase # {{{
 {
   const # {{{
     # memory for FFI calls
@@ -1278,11 +1227,10 @@ abstract class ConioPseudo
     # }}}
   # }}}
   # basis {{{
-  public object
-    $events;
   public ?object
-    $error=null,$reading=null;
+    $error=null;
   public array
+    $input=[],$inputTime=[],$inputSize=[],
     $re,# patterns for sync parser
     $env,# environment variables
     $sio,# system modes of the terminal
@@ -1294,15 +1242,16 @@ abstract class ConioPseudo
     $lastSize=null,$lastScroll=null;
   public string
     $devAttr='',$devId='',$id='',
-    $partBuf='',$writeBuf1='',$writeBuf2='';
+    $inputPart='',$writeBuf1='',$writeBuf2='';
   public int
-    $eventTimeout=3*1000000000,# seconds in nano
-    $timeout=500,# ms
-    $delay=0,$async=0,$ansi=0,$s8c1t=0,
+    $inputShift1=0,$inputShift2=0,$pending=0,
+    $inputTimeout=3*1000000000,# ns, decomposition
+    $timeout=500,# ms, approximate response
+    $async=0,$ansi=0,$s8c1t=0,
     $xcolor=0,$colors=0,$unicode=1,$keyboard=0,
     $mouse=0,$mouseBtn=0,$mouseX=0,$mouseY=0,
     $buffering=0,$writing=0,$writeLen1=0,$writeLen2=0,
-    $pending=0,$focused=1,$lastFocused=1;
+    $focused=1,$lastFocused=1;
   ###
   protected function __construct(
     public object  $api,    # FFI library bindings
@@ -1312,7 +1261,6 @@ abstract class ConioPseudo
     public string  $devPath,# terminal device path
     public array   $mode    # initial configuration
   ) {
-    $this->events = new SplDoublyLinkedList();
     $this->env    = getenv(null, true) ?: [];
     $this->sio    = $mode['sio'];
     $this->size   = $mode['size'];
@@ -1528,17 +1476,18 @@ abstract class ConioPseudo
   # }}}
   # }}}
   # abstrasis {{{
+  abstract static function new(): object;
   abstract function puts(string $s): void;
   abstract function setMode(array $m): void;
   abstract function getId(): string;
-  abstract function gets(): string;
+  abstract function gets(int $timeout=0): string;
   abstract function write(): void;
   abstract function resize(): bool;
-  abstract function read(int $time): bool;
+  abstract function read(): bool;
   abstract function finit(): void;
   abstract function close(): void;
   # }}}
-  # control functions (sync) {{{
+  # C0/C1 functions (sync) {{{
   function _DECRQM(array $m): array # {{{
   {
     # compose the request
@@ -1566,7 +1515,7 @@ abstract class ConioPseudo
       if (!$i)
       {
         throw ErrorEx::fatal(
-          'DECRPM','timed out ('.$j.')'
+          'DECRPM','timed out ('.$j.' queries)'
         );
       }
     }
@@ -1717,7 +1666,7 @@ abstract class ConioPseudo
     if (($s = $this->gets()) === '')
     {
       throw ErrorEx::fatal(
-        'CPR','response timed out'
+        'CPR','timed out'
       );
     }
     if (!preg_match($this->re['CPR'], $s, $a))
@@ -1731,21 +1680,6 @@ abstract class ConioPseudo
   # }}}
   # }}}
   # setters {{{
-  function setRead(?object $o=null): bool # {{{
-  {
-    if ($o)
-    {
-      if ($this->reading) {
-        return false;
-      }
-      $this->reading = $o;
-    }
-    else {
-      $this->reading = null;
-    }
-    return true;
-  }
-  # }}}
   function setMouse(int $n): void # {{{
   {
     $this->mouse &&
@@ -1850,35 +1784,31 @@ abstract class ConioPseudo
     $this->focused = $i ? 1 : 0;
   }
   # }}}
-  function setPending(int $n, int $time): int # {{{
+  function setPending(int $i): int # {{{
   {
-    # by comparing current and initial counts,
-    # check no event was added (except the dummy)
-    $q = $this->events;
-    if (($k = $q->count()) === $n + 1)
-    {
-      # remove dummy
-      $q->pop();
-      return 0;
+    # to determine group size,
+    # substract initial from current count
+    $c = count($this->input) - $this->inputShift2;
+    if (($n = $c - $i) <= 0) {
+      return $c;
     }
-    # replace dummy with events group
-    $q[$n] = [
-      Conio::EV_GROUP,
-      $time + $this->eventTimeout,# expiration
-      $k - $n - 1 # size of the group
-    ];
-    # update counter and complete
-    return $this->pending = $k;
+    # set group size and expiration time
+    $this->inputSize[] = $n;
+    $this->inputTime[] =
+      Loop::$HRTIME + $this->inputTimeout;
+    # update current and complete
+    return $this->pending = $c;
   }
   # }}}
   function clearInput(): void # {{{
   {
-    $this->partBuf = '';
-    if ($this->pending)
-    {
-      $this->events  = new SplDoublyLinkedList();
-      $this->pending = 0;
-    }
+    $this->inputPart   = '';
+    $this->inputTime   = [];
+    $this->inputSize   = [];
+    $this->input       = [];
+    $this->inputShift1 = 0;
+    $this->inputShift2 = 0;
+    $this->pending     = 0;
   }
   # }}}
   function clearOutput(): void # {{{
@@ -1944,7 +1874,6 @@ abstract class ConioPseudo
     if (($s = $this->gets()) === '' ||
         !preg_match($this->re['RGB'], $s, $a))
     {
-      echo "[NOT SUPPORTED]";
       return 0;
     }
     # supported!
@@ -2008,9 +1937,8 @@ abstract class ConioPseudo
   }
   # }}}
   # }}}
-  # parsers {{{
+  # parsers/getters {{{
   function parse8(# 8-bit response parser {{{
-    object $q,# the queue to push events to
     string $s,# the string to parse
     int $n,   # the length of the string
     int $eop  # end of the previous partial
@@ -2029,28 +1957,28 @@ abstract class ConioPseudo
         case 0x08:# K_BACKSPACE
         case 0x09:# K_TAB
         case 0x0D:# K_RETURN
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             $k, 0, $c
-          ]);
+          ];
           break;
         case 0x1B:# K_ESCAPE
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             $k, 0, ''
-          ]);
+          ];
           break;
         case 0x7F:# K_BACKSPACE
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             Conio::K_BACKSPACE, 0, ''
-          ]);
+          ];
           break;
         default:# CTRL combo
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             ...self::KEY_ASCII[$k], ''
-          ]);
+          ];
           break;
         }
         # }}}
@@ -2058,10 +1986,10 @@ abstract class ConioPseudo
       elseif ($k < 0x80)
       {
         # ASCII: printable character
-        $q->push([
+        $this->input[] = [
           Conio::EV_KEY, 1,
           ...self::KEY_ASCII[$k], $c
-        ]);
+        ];
       }
       elseif ($k < 0xA0)
       {
@@ -2072,7 +2000,7 @@ abstract class ConioPseudo
         {
           if ($eop && $i < $eop)
           {
-            $q->push([
+            $this->input[] = [
               Conio::EV_ERROR,
               ErrorEx::fail(
                 "incomplete 8-bit control".
@@ -2080,7 +2008,7 @@ abstract class ConioPseudo
                 " at ".$i."\n".
                 Fx::strhex($s, ':')
               )
-            ]);
+            ];
             return -1;
           }
           return $i;
@@ -2104,7 +2032,7 @@ abstract class ConioPseudo
             # check oversized parameter
             if ($m - $j > 3)
             {
-              $q->push([
+              $this->input[] = [
                 Conio::EV_ERROR,
                 ErrorEx::fail(
                   "incorrect SS3 control".
@@ -2113,7 +2041,7 @@ abstract class ConioPseudo
                   ($m - $j)." > 3)\n".
                   Fx::strhex($s, ':')
                 )
-              ]);
+              ];
               return -1;
             }
             # check partial
@@ -2121,21 +2049,21 @@ abstract class ConioPseudo
             {
               if ($eop && $i < $eop)
               {
-                $q->push([
+                $this->input[] = [
                   Conio::EV_ERROR,
                   ErrorEx::fail(
                     "incomplete SS3 control".
                     " at ".$i."\n".
                     Fx::strhex($s, ':')
                   )
-                ]);
+                ];
                 return -1;
               }
               return $i;
             }
             # otherwise, its obvious that
             # the [F]inal byte is wrong
-            $q->push([
+            $this->input[] = [
               Conio::EV_ERROR,
               ErrorEx::fail(
                 "incorrect SS3 control".
@@ -2144,11 +2072,11 @@ abstract class ConioPseudo
                 " 0x".Fx::strhex($s[$m])."\n".
                 Fx::strhex($s, ':')
               )
-            ]);
+            ];
             return -1;
           }
           # parse ahead
-          $i += $this->parseSS3($q, $a);
+          $i += $this->parseSS3($a);
           break;
           # }}}
         case 0x9B:# CSI {{{
@@ -2167,7 +2095,7 @@ abstract class ConioPseudo
             # check oversized parameter
             if ($m - $j > 30)
             {
-              $q->push([
+              $this->input[] = [
                 Conio::EV_ERROR,
                 ErrorEx::fail(
                   "incorrect CSI control".
@@ -2176,7 +2104,7 @@ abstract class ConioPseudo
                   ($m - $j)." > 30)\n".
                   Fx::strhex($s, ':')
                 )
-              ]);
+              ];
               return -1;
             }
             # check partial, either current or
@@ -2188,21 +2116,21 @@ abstract class ConioPseudo
             {
               if ($eop && $i < $eop)
               {
-                $q->push([
+                $this->input[] = [
                   Conio::EV_ERROR,
                   ErrorEx::fail(
                     "incomplete CSI control".
                     " at ".$i."\n".
                     Fx::strhex($s, ':')
                   )
-                ]);
+                ];
                 return -1;
               }
               return $i;
             }
             # something must be wrong with either
             # [I]ntermediate or the [F]inal byte
-            $q->push([
+            $this->input[] = [
               Conio::EV_ERROR,
               ErrorEx::fail(
                 "incorrect CSI control".
@@ -2212,13 +2140,11 @@ abstract class ConioPseudo
                 " at ".$m."\n".
                 Fx::strhex($s, ':')
               )
-            ]);
+            ];
             return -1;
           }
-          $j = $this->parseCSI(
-            $q, $a, $s, $j, $n, $eop
-          );
-          # check failed or partial
+          # parse and check failed or partial
+          $j = $this->parseCSI($a, $s, $j, $n, $eop);
           if ($j <= 0) {
             return $j ? -1 : $i;
           }
@@ -2237,7 +2163,7 @@ abstract class ConioPseudo
             {
               if ($eop && $i < $eop)
               {
-                $q->push([
+                $this->input[] = [
                   Conio::EV_ERROR,
                   ErrorEx::fail(
                     "incomplete control string".
@@ -2246,12 +2172,12 @@ abstract class ConioPseudo
                     "missing terminator (ST)\n".
                     Fx::strhex($s, ':')
                   )
-                ]);
+                ];
                 return -1;
               }
               return $i;
             }
-            $q->push([
+            $this->input[] = [
               Conio::EV_ERROR,
               ErrorEx::fail(
                 "incorrect control string".
@@ -2259,11 +2185,11 @@ abstract class ConioPseudo
                 " at ".$i."\n".
                 Fx::strhex($s, ':')
               )
-            ]);
+            ];
             return -1;
           }
           # add control string
-          $q->push([$k, $a[1]]);
+          $this->input[] = [$k, $a[1]];
           $i += strlen($a[0]);
           break;
           # }}}
@@ -2273,7 +2199,7 @@ abstract class ConioPseudo
           # but there is only few variants
           # that are either a response or
           # an event from the terminal..
-          $q->push([
+          $this->input[] = [
             Conio::EV_ERROR,
             ErrorEx::fail(
               "unknown 8-bit control".
@@ -2281,7 +2207,7 @@ abstract class ConioPseudo
               " at ".$i."\n".
               Fx::strhex($s, ':')
             )
-          ]);
+          ];
           return -1;
           # }}}
         }
@@ -2291,7 +2217,7 @@ abstract class ConioPseudo
       {
         # unicode character
         $k = $this->parseUTF8(
-          $q, $k, $c, $s, $i, $n, $eop
+          $k, $c, $s, $i, $n, $eop
         );
         if ($k <= 0) {
           return $k ? -1 : $i;
@@ -2304,7 +2230,7 @@ abstract class ConioPseudo
   }
   # }}}
   function parse7(# 7-bit response parser {{{
-    object $q, string $s, int $n, int $eop
+    string $s, int $n, int $eop
   ):int
   {
     $a = null;
@@ -2320,16 +2246,16 @@ abstract class ConioPseudo
         case 0x08:# K_BACKSPACE
         case 0x09:# K_TAB
         case 0x0D:# K_RETURN
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             $k, 0, $c
-          ]);
+          ];
           break;
         case 0x7F:# K_BACKSPACE
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             Conio::K_BACKSPACE, 0, ''
-          ]);
+          ];
           break;
         case 0x1B:
           # ESC sequence requires at least 2 bytes,
@@ -2342,10 +2268,10 @@ abstract class ConioPseudo
             # eop (end-of-partial) marker
             if ($eop && $i < $eop)
             {
-              $q->push([
+              $this->input[] = [
                 Conio::EV_KEY, 1,
                 Conio::K_ESCAPE, 0, ''
-              ]);
+              ];
               break;
             }
             # request eop
@@ -2370,7 +2296,7 @@ abstract class ConioPseudo
               # ask for more data
               return $i;
             }
-            $i += 1 + $this->parseSS3($q, $a);
+            $i += 1 + $this->parseSS3($a);
             break 2;
             # }}}
           case 0x5B:# CSI {{{
@@ -2386,11 +2312,8 @@ abstract class ConioPseudo
               # ask for more data
               return $i;
             }
-            # parse ahead
-            $j = $this->parseCSI(
-              $q, $a, $s, $j, $n, $eop
-            );
-            # check failed or partial
+            # parse and check failed or partial
+            $j = $this->parseCSI($a, $s, $j, $n, $eop);
             if ($j <= 0) {
               return $j ? -1 : $i;
             }
@@ -2409,7 +2332,7 @@ abstract class ConioPseudo
               return $i;# ask for more data
             }
             # add control string
-            $q->push([0x40 + $k, $a[1]]);
+            $this->input[] = [0x40 + $k, $a[1]];
             $i += 1 + strlen($a[0]);
             break 2;
             # }}}
@@ -2421,25 +2344,25 @@ abstract class ConioPseudo
             $a = self::KEY_ASCII[$k];
             $k = $a[0];
             $m = $a[1] | Conio::KM_ALT;
-            $q->push([
+            $this->input[] = [
               Conio::EV_KEY, 1, $k, $m, ''
-            ]);
+            ];
             $i++;
             break;
           }
           # non-legacy key combination
           # is encoded with the full ESC sequence,
           # so this must be a standalone ESC key
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             Conio::K_ESCAPE, 0, ''
-          ]);
+          ];
           break;
         default:# legacy CTRL combo
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             ...self::KEY_ASCII[$k], ''
-          ]);
+          ];
           break;
         }
         # }}}
@@ -2447,16 +2370,16 @@ abstract class ConioPseudo
       elseif ($k < 0x80)
       {
         # ASCII printable character
-        $q->push([
+        $this->input[] = [
           Conio::EV_KEY, 1,
           ...self::KEY_ASCII[$k], $c
-        ]);
+        ];
       }
       else
       {
         # unicode character
         $k = $this->parseUTF8(
-          $q, $k, $c, $s, $i, $n, $eop
+          $k, $c, $s, $i, $n, $eop
         );
         if ($k <= 0) {
           return $k ? -1 : $i;
@@ -2468,9 +2391,7 @@ abstract class ConioPseudo
     return $i;
   }
   # }}}
-  function parseSS3(# {{{
-    object $q, array $a
-  ):int # bytes consumed
+  function parseSS3(array $a): int # {{{
   {
     # advance to the end of the sequence
     $j = strlen($a[0]);
@@ -2486,19 +2407,20 @@ abstract class ConioPseudo
         ? $a[1]
         : $a[1] | self::key_modifier((int)$b);
       # add key
-      $q->push([Conio::EV_KEY, 1, $k, $m, '']);
+      $this->input[] = [
+        Conio::EV_KEY, 1, $k, $m, ''
+      ];
     }
     else
     {
       # add SS3 code
-      $q->push([0x8F, $b, $c]);
+      $this->input[] = [0x8F, $b, $c];
     }
     return $j;
   }
   # }}}
   function parseCSI(# {{{
-    object $q, array $a,
-    string $s, int $i, int $n, int $eop
+    array $a, string $s, int $i, int $n, int $eop
   ):int # bytes consumed
   {
     # prepare parameters
@@ -2513,12 +2435,8 @@ abstract class ConioPseudo
     case 0:# {{{
       # handle mouse tracking
       switch ($c) {
-      case 'M':# X10 mouse protocol
-        # parse
-        $k = $this->parseMouseX10(
-          $q, $s, $i, $n, $eop
-        );
-        # complete
+      case 'M':# mouse protocol
+        $k = $this->parseMouseX10($s, $i, $n, $eop);
         return ($k > 0)
           ? ($j + $k) # successful
           : ($k ? -1 : 0);# failed or partial
@@ -2533,10 +2451,10 @@ abstract class ConioPseudo
       # handle unmodified special key
       if (isset(self::KEY_SPECIAL[$c]))
       {
-        $q->push([
+        $this->input[] = [
           Conio::EV_KEY, 1,
           ...self::KEY_SPECIAL[$c], ''
-        ]);
+        ];
         return $j;
       }
       break;
@@ -2546,10 +2464,10 @@ abstract class ConioPseudo
       if ($c === '~' &&
           isset(self::KEY_SPECIAL[$b]))
       {
-        $q->push([
+        $this->input[] = [
           Conio::EV_KEY, 1,
           ...self::KEY_SPECIAL[$b], ''
-        ]);
+        ];
         return $j;
       }
       break;
@@ -2561,11 +2479,11 @@ abstract class ConioPseudo
         $d = $a[0].'~';
         if (isset(self::KEY_SPECIAL[$d]))
         {
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             self::KEY_SPECIAL[$d][0],
             self::key_modifier((int)$a[1]), ''
-          ]);
+          ];
           return $j;
         }
       }
@@ -2573,11 +2491,11 @@ abstract class ConioPseudo
       {
         if (isset(self::KEY_SPECIAL[$c]))
         {
-          $q->push([
+          $this->input[] = [
             Conio::EV_KEY, 1,
             self::KEY_SPECIAL[$c][0],
             self::key_modifier((int)$a[1]), ''
-          ]);
+          ];
           return $j;
         }
       }
@@ -2592,11 +2510,11 @@ abstract class ConioPseudo
         $y = (int)$a[2];
         if ($k = $this->getMouseState($n, $x, $y))
         {
-          $q->push([
+          $this->input[] = [
             Conio::EV_MOUSE, $k,
             self::btn_modifier($n),
             $x, $y
-          ]);
+          ];
         }
         return $j;
       }
@@ -2609,23 +2527,22 @@ abstract class ConioPseudo
           ? chr($k)
           : '';
         ###
-        $q->push([
+        $this->input[] = [
           Conio::EV_KEY, 1,
           self::KEY_ASCII[$k][0], $m, $c
-        ]);
+        ];
         return $j;
       }
       break;
       # }}}
     }
     # add CSI code
-    $q->push([0x9B, $a, $c]);
+    $this->input[] = [0x9B, $a, $c];
     return $j;
   }
   # }}}
   function parseUTF8(# {{{
-    object $q, int $k, string $c,
-    string $s, int $i, int $n, int $eop
+    int $k, string $c, string $s, int $i, int $n, int $eop
   ):int
   {
     # UTF-8 scheme {{{
@@ -2645,14 +2562,14 @@ abstract class ConioPseudo
       {
         if ($eop && $i < $eop)
         {
-          $q->push([
+          $this->input[] = [
             Conio::EV_ERROR,
             ErrorEx::fail(
               "incomplete UTF-8[2] character".
               " at ".$i."\n".
               Fx::strhex($s, ':')
             )
-          ]);
+          ];
           return -1;
         }
         return 0;
@@ -2661,7 +2578,7 @@ abstract class ConioPseudo
       $j = ord($d = $s[++$i]);
       if ($j < 0x80 || $j > 0xBF)
       {
-        $q->push([
+        $this->input[] = [
           Conio::EV_ERROR,
           ErrorEx::fail(
             "incorrect UTF-8[2] byte".
@@ -2669,7 +2586,7 @@ abstract class ConioPseudo
             " at ".$i."\n".
             Fx::strhex($s, ':')
           )
-        ]);
+        ];
         return -1;
       }
       # check legacy 8-bit ALT combo (xterm)
@@ -2691,10 +2608,10 @@ abstract class ConioPseudo
         $k = $m = 0;
       }
       # add
-      $q->push([
+      $this->input[] = [
         Conio::EV_KEY, 1,
         $k, $m, $c
-      ]);
+      ];
       return 1;
     }
     # }}}
@@ -2706,14 +2623,14 @@ abstract class ConioPseudo
       {
         if ($eop && $i < $eop)
         {
-          $q->push([
+          $this->input[] = [
             Conio::EV_ERROR,
             ErrorEx::fail(
               "incomplete UTF-8[3] character".
               " at ".$i."\n".
               Fx::strhex($s, ':')
             )
-          ]);
+          ];
           return -1;
         }
         return 0;
@@ -2725,7 +2642,7 @@ abstract class ConioPseudo
         $c = $c.$d;
         if ($k < 0x80 || $k > 0xBF)
         {
-          $q->push([
+          $this->input[] = [
             Conio::EV_ERROR,
             ErrorEx::fail(
               "incorrect UTF-8[3] byte".
@@ -2733,14 +2650,14 @@ abstract class ConioPseudo
               " at ".$i."\n".
               Fx::strhex($s, ':')
             )
-          ]);
+          ];
           return -1;
         }
       }
       # add
-      $q->push([
+      $this->input[] = [
         Conio::EV_KEY, 1, 0, 0, $c
-      ]);
+      ];
       return 2;
     }
     # }}}
@@ -2752,14 +2669,14 @@ abstract class ConioPseudo
       {
         if ($eop && $i < $eop)
         {
-          $q->push([
+          $this->input[] = [
             Conio::EV_ERROR,
             ErrorEx::fail(
               "incomplete UTF-8[4] character".
               " at ".$i."\n".
               Fx::strhex($s, ':')
             )
-          ]);
+          ];
           return -1;
         }
         return 0;
@@ -2771,7 +2688,7 @@ abstract class ConioPseudo
         $c = $c.$d;
         if ($k < 0x80 || $k > 0xBF)
         {
-          $q->push([
+          $this->input[] = [
             Conio::EV_ERROR,
             ErrorEx::fail(
               "incorrect UTF-8[4] byte".
@@ -2779,19 +2696,19 @@ abstract class ConioPseudo
               " at ".$i."\n".
               Fx::strhex($s, ':')
             )
-          ]);
+          ];
           return -1;
         }
       }
       # add
-      $q->push([
+      $this->input[] = [
         Conio::EV_KEY, 1, 0, 0, $c
-      ]);
+      ];
       return 3;
     }
     # }}}
     # incorrect
-    $q->push([
+    $this->input[] = [
       Conio::EV_ERROR,
       ErrorEx::fail(
         "incorrect input byte".
@@ -2799,12 +2716,12 @@ abstract class ConioPseudo
         " at ".$i."\n".
         Fx::strhex($s, ':')
       )
-    ]);
+    ];
     return -1;
   }
   # }}}
   function parseMouseX10(# {{{
-    object $q, string $s, int $i, int $n, int $eop
+    string $s, int $i, int $n, int $eop
   ):int # number of bytes consumed
   {
     # the current offset (i) is at the end
@@ -2814,14 +2731,14 @@ abstract class ConioPseudo
     {
       if ($eop && $i < $eop)
       {
-        $q->push([
+        $this->input[] = [
           Conio::EV_ERROR,
           ErrorEx::fail(
             "incomplete X10 mouse event".
             " at ".$i."\n".
             Fx::strhex($s, ':')
           )
-        ]);
+        ];
         return -1;
       }
       return 0;
@@ -2838,7 +2755,7 @@ abstract class ConioPseudo
     # check incorrect
     if ($x <= 0x20 || $y <= 0x20)
     {
-      $q->push([
+      $this->input[] = [
         Conio::EV_ERROR,
         ErrorEx::fail(
           "incorrect X10 mouse coordinate".
@@ -2848,7 +2765,7 @@ abstract class ConioPseudo
           )."\n".
           Fx::strhex($s, ':')
         )
-      ]);
+      ];
       return -1;
     }
     # determine coordinates
@@ -2860,11 +2777,11 @@ abstract class ConioPseudo
       return 3;
     }
     # add event and complete
-    $q->push([
+    $this->input[] = [
       Conio::EV_MOUSE, $k,
       self::btn_modifier($j),
       $x, $y
-    ]);
+    ];
     return 3;
   }
   # }}}
@@ -2951,6 +2868,54 @@ abstract class ConioPseudo
     }
     return 0;# incorrect
     /***/
+  }
+  # }}}
+  function getEvents(): array # {{{
+  {
+    # prepare
+    $a = [];
+    # add focus event
+    if (($i = $this->lastFocused) >= 0)
+    {
+      if ($i !== $this->focused) {
+        $a[] = [Conio::EV_FOCUS, $this->focused];
+      }
+      $this->lastFocused = -1;
+    }
+    # add resize/scroll event
+    if ($b = $this->lastSize)
+    {
+      if ($b !== $this->size) {
+        $a[] = [Conio::EV_RESIZE, $this->size, $b];
+      }
+      $this->lastSize = $this->lastScroll = null;
+    }
+    elseif ($b = $this->lastScroll)
+    {
+      if ($b !== $this->lastScroll) {
+        $a[] = [Conio::EV_SCROLL, $this->scroll, $b];
+      }
+      $this->lastScroll = null;
+    }
+    # add input events
+    if ($this->pending)
+    {
+      # extract fresh
+      $b = ($i = $this->inputShift2)
+        ? array_slice($this->input, $i)
+        : $this->input;
+      # add
+      $a = array_merge($a, $b);
+      # cleanup
+      $this->inputShift1 = 0;
+      $this->inputShift2 = 0;
+      $this->pending     = 0;
+      $this->inputTime   = [];
+      $this->inputSize   = [];
+      $this->input       = [];
+    }
+    # complete
+    return $a;
   }
   # }}}
   # }}}
@@ -3051,5 +3016,51 @@ abstract class ConioPseudo
     return true;
   }
   # }}}
+  function refresh(int $time): self # {{{
+  {
+    # check no pending input
+    if (!($n = $this->pending)) {
+      return $this;
+    }
+    # check the first fresh group is staled
+    $i = $this->inputShift1;
+    if ($time < $this->inputTime[$i]) {
+      return $this;
+    }
+    # seek to the first fresh
+    $k = 0;
+    do {
+      $k += $this->inputSize[$i++];
+    }
+    while ($k < $n && $this->inputTime[$i] < $time);
+    # update indexes
+    $this->inputShift1 = $i;
+    $this->inputShift2 = $j = $this->inputShift2 + $k;
+    $this->pending     = $n = $n - $k;
+    # decompose reasonable amount
+    if ($j > 100)
+    {
+      if ($n)
+      {
+        $this->inputTime = array_slice(
+          $this->inputTime, $i
+        );
+        $this->inputSize = array_slice(
+          $this->inputSize, $i
+        );
+        $this->input = array_slice($this->input, $j);
+      }
+      else
+      {
+        $this->inputTime = [];
+        $this->inputSize = [];
+        $this->input = [];
+      }
+    }
+    # complete
+    return $this;
+  }
+  # }}}
 }
+# }}}
 ###

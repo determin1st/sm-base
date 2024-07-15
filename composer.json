@@ -10,7 +10,7 @@
         "classmap": [
             "conio.php",
             "error.php",
-            "fetch.php",
+            "hurl.php",
             "mustache.php",
             "promise.php",
             "sync.php"

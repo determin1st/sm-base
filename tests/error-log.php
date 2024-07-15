@@ -5,9 +5,9 @@ require_once
   '..'.DIRECTORY_SEPARATOR.
   'autoload.php';
 ###
-Conio::init() && exit;
-ErrorLog::init(['ansi' => Conio::is_ansi()]);
-$logs = [
+Conio::init() && exit();
+###
+$TESTLOG = [
 # top multilines {{{
 [
   'level' => 0,
@@ -20,8 +20,7 @@ $logs = [
     "by population census and private tax farming\n".
     "was abolished in favor for civil service tax collectors.\n".
     "This made provincial administration far more tolerable,\n".
-    "decreased corruption and oppression and\n".
-    "increased revenues."
+    "decreased corruption, oppression and increased revenues."
   ],
   'span'  => 123456,
   'time'  => 1700073135,
@@ -203,22 +202,142 @@ $logs = [
 ],
 # }}}
 ];
-if (0)
+while (1)
 {
-  file_put_contents(
-    substr(__FILE__, 0, -4).'.json',
-    json_encode($logs,  JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)
-  );
+  switch (show_menu()) {
+  case '1':# {{{
+    echo "TESTLOG: \n";
+    echo ErrorLog::render($TESTLOG);
+    break;
+  # }}}
+  case '2':# {{{
+    echo "> PromiseResult:\n";
+    $r = await(
+      Promise::Func(function($r) {
+        $r->info('information','is','very','good');
+        $r->warn(
+          'wow',"warning\nplus multiline message"
+        );
+        $r->info('standard positive message');
+        $r->error(ErrorEx::fatal());
+        $r->pupa();
+        $r->confirm('title','number','one');
+      })
+      ->okay(function($r) {
+        $r->info('this message never appears');
+      })
+      ->failFuse(function($r) {
+        $r->warn('something bad happened but im going to fix it all!');
+        $r->info('yes','yes','well done!!!');
+        $r->info(# 1
+          'this','title','is','oneliner'
+        );
+        $r->confirm('the test of promise result','complete');
+      })
+      ->okay(function($r) {
+        $r->info('this message never appears');
+      })
+    );
+    /***/
+    echo ErrorLog::render($r);
+    break;
+  # }}}
+  case '3':# {{{
+    echo "DUMP: ";
+    $r = await(
+      Promise::Func(function($r) {
+        $r->info('message #1')
+          ->valueSet('value #1')
+          ->valuePut('value #2')
+          ->valuePut(12345)
+          ->valuePut([1,2,3])
+          ->valueSet('1-2-3')
+          ->warn('message #2')
+          ->fail('message #3')
+          ->confirm('OPERATION','COOPERATION');
+        ###
+      })
+      ->thenColumn([
+        Promise::Func(function($r) {
+          $a = 'element #1';
+          $r->valuePut($a);
+        }),
+        Promise::Func(function($r) {
+          $r->value = 'element #2';
+          $r->fail('oops');
+        }),
+        Promise::Func(function($r) {
+          $r->valueSet('element #3');
+        }),
+      ])
+      ->then(function($r) {
+        $r->confirm('subtitle');
+        $r->confirm('main title');
+      })
+    );
+    var_dump($r);
+    echo "\n";
+    break;
+  # }}}
+  case '4':# {{{
+    echo "DUMP: \n";
+    $r = await(
+      Promise::Func(function($r) {
+        $r->info('row results follow');
+      })
+      ->thenRow([
+        Promise::Delay(10, function($r) {
+          $r->valuePut('element #1');
+        }),
+        Promise::Func(function($r) {
+          $a = 'element #2';
+          $r->valueSet($a)->fail('oops');
+        }),
+        Promise::Func(function($r) {
+          $r->valueSet('element #3-1');
+          $r->valuePut('element #3-2');
+          $r->valuePut('element #3-3');
+        }),
+      ])
+    );
+    var_dump($r);
+    #echo ErrorLog::render($r);
+    break;
+  # }}}
+  case 'q':
+    echo "quit\n";
+    break 2;
+  }
 }
-echo $out = ErrorLog::render($logs);
+function show_menu(): string # {{{
+{
+  echo <<<TEXT
+
+ [1] ErrorLog::render([TESTLOG])
+ [2] ErrorLog::render(<PromiseResult>)
+ [3] dump Promise::Column
+ [4] dump Promise::Row
+ [q] quit
+
+> 
+TEXT;
+  if (!($r = await(Conio::readch()))->ok)
+  {
+    echo "\n".ErrorLog::render($r);
+    exit();
+  }
+  return $r->value;
+}
+# }}}
+/***
 if (0)
 {
   file_put_contents(
     substr(__FILE__, 0, -4).'.out',
-    #mb_convert_encoding($out, 'UTF-16BE', 'UTF-8')
-    #iconv('UTF-8', 'CP866', $out)
-    mb_convert_encoding($out, 'CP866', 'UTF-8')
-    #$out
+    #mb_convert_encoding($s, 'UTF-16BE', 'UTF-8')
+    #iconv('UTF-8', 'CP866', $s)
+    mb_convert_encoding($s, 'CP866', 'UTF-8')
   );
 }
+/***/
 ###

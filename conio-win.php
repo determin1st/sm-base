@@ -3,9 +3,9 @@ namespace SM;
 use FFI,Throwable;
 use function
   str_repeat,strlen,substr,strrpos,trim,dechex,
-  pack,unpack,usleep;
+  pack,unpack;
 ###
-abstract class ConioBase extends ConioPseudo
+abstract class Conio_Base extends Conio_PseudoBase
 {
   # constants {{{
   const ASK = "\x1B[0c";# DA1
@@ -66,11 +66,11 @@ abstract class ConioBase extends ConioPseudo
       # construct specific instance
       $base = self::is_async($api, $mem, $h1)
         ? ($isVt
-          ? new ConioAP($api,$mem,$h0,$h1,$ds,$mode)
-          : new ConioAD($api,$mem,$h0,$h1,$ds,$mode))
+          ? new Conio_BaseAP($api,$mem,$h0,$h1,$ds,$mode)
+          : new Conio_BaseAD($api,$mem,$h0,$h1,$ds,$mode))
         : ($isVt
-          ? new ConioSP($api,$mem,$h0,$h1,$ds,$mode)
-          : new ConioSD($api,$mem,$h0,$h1,$ds,$mode));
+          ? new Conio_BaseSP($api,$mem,$h0,$h1,$ds,$mode)
+          : new Conio_BaseSD($api,$mem,$h0,$h1,$ds,$mode));
       #####
       # initialize
       $base->setConstructed();
@@ -409,7 +409,7 @@ abstract class ConioBase extends ConioPseudo
       );
     }
     # wait for completion
-    do {\sleep(0);}
+    do {Loop::cooldown();}
     while (--$w > 0);
     # complete
     return $w < 0;
@@ -572,22 +572,20 @@ abstract class ConioBase extends ConioPseudo
     return $a;
   }
   # }}}
-  function gets(): string # {{{
+  function gets(int $timeout=0): string # {{{
   {
     # prepare
+    $timeout || $timeout = $this->timeout;
     $api = $this->api;
     $mem = $this->varmem;
     $h   = $this->f0;
-    $i   = $this->timeout;
     # wait for the input
     while (!($n = self::kbhit($api, $mem, $h)))
     {
-      # check timed out
-      if (($i -= 5) < 0) {
-        return '';
+      if (($timeout -= 5) < 0) {
+        return '';# timed out
       }
-      # cooldown..
-      \sleep(0);usleep(5000);# 5ms
+      Loop::cooldown(5);
     }
     # get input records and
     # filter them into a string
@@ -692,15 +690,15 @@ abstract class ConioBase extends ConioPseudo
       # windows api is always capable
       # of moving cursor around - move it and
       # cleanup the screen
-      $a = $base->cursor;
-      $a[0] += $base->scroll[2] - 1;
-      $a[1] += $base->scroll[3] - 1;
-      $base->setCursorPos($a);
-      $base->puts('          ');
-      $base->setCursorPos($a);
+      $a = $this->cursor;
+      $a[0] += $this->scroll[2] - 1;
+      $a[1] += $this->scroll[3] - 1;
+      $this->setCursorPos($a);
+      $this->puts('          ');
+      $this->setCursorPos($a);
       # dumb terminal is acceptable,
       # set identity and complete
-      $base->id = self::TERMID[0];
+      $this->id = self::TERMID[0];
       return false;
     }
     # DECRQM is wildly ignored among
@@ -726,7 +724,7 @@ abstract class ConioBase extends ConioPseudo
     return true;
   }
   # }}}
-  function read(int $time): bool # {{{
+  function read(): bool # {{{
   {
     # prepare
     $api = $this->api;
@@ -749,8 +747,6 @@ abstract class ConioBase extends ConioPseudo
     # prepare for parsing
     $r = self::get_input($api, $mem, $i, $n);
     $c = $this->pending;
-    $q = $this->events;
-    $q->push(null);
     # parse records
     for ($s='',$i=0; $i < $n; ++$i)
     {
@@ -760,7 +756,7 @@ abstract class ConioBase extends ConioPseudo
         ###
         $e = $e->Event->KeyEvent;
         ###
-        $q->push([
+        $this->input[] = [
           Conio::EV_KEY,
           ($e->bKeyDown
             ? $e->wRepeatCount # pressed (down)
@@ -771,7 +767,7 @@ abstract class ConioBase extends ConioPseudo
           (($j = $e->uChar)
             ? self::u8chr($j)
             : '')
-        ]);
+        ];
         break;
         # }}}
       case 0x0002:# MOUSE_EVENT {{{
@@ -832,13 +828,13 @@ abstract class ConioBase extends ConioPseudo
         ###
         $k = $e->dwControlKeyState;
         $e = $e->dwMousePosition;
-        $q->push([
+        $this->input[] = [
           Conio::EV_MOUSE, $j, $k,
           # convert windows-specific coordinates
           # into common format [1..cols,1..rows]
           $e->X + 1 - $this->scroll[2],
           $e->Y + 1 - $this->scroll[3]
-        ]);
+        ];
         break;
         # }}}
       case 0x0004:# WINDOW_BUFFER_SIZE_EVENT {{{
@@ -865,7 +861,7 @@ abstract class ConioBase extends ConioPseudo
       }
     }
     # complete
-    return $this->setPending($c, $time) > 0;
+    return $this->setPending($c) > $c;
   }
   # }}}
   function resize(): bool # {{{
@@ -948,7 +944,7 @@ abstract class ConioBase extends ConioPseudo
   # }}}
   # }}}
 }
-trait Conio_A # Async {{{
+trait Conio_BaseA # Async {{{
 {
   # base {{{
   public object $writeCallback,$overlapped;
@@ -980,7 +976,7 @@ trait Conio_A # Async {{{
     if ($x)
     {
       # wait for completion
-      do {\sleep(0);}
+      do {Loop::cooldown();}
       while ($this->writing > 0);
     }
     else
@@ -1062,7 +1058,7 @@ trait Conio_A # Async {{{
     # wait for completion
     $n = 1000;# number of attempts
     while ($this->writing > 0 && --$n) {
-      \sleep(0);
+      Loop::cooldown();
     }
     if ($n)
     {
@@ -1078,7 +1074,7 @@ trait Conio_A # Async {{{
   # }}}
 }
 # }}}
-trait Conio_P # Pseudo-Terminal {{{
+trait Conio_BaseP # Pseudo-Terminal {{{
 {
   # Windows > 6.1
   static function get_applied_mode(): array
@@ -1102,7 +1098,7 @@ trait Conio_P # Pseudo-Terminal {{{
   }
 }
 # }}}
-trait Conio_D # Dumb-Terminal {{{
+trait Conio_BaseD # Dumb-Terminal {{{
 {
   # Windows <= 6.1
   static function get_applied_mode(): array
@@ -1122,20 +1118,20 @@ trait Conio_D # Dumb-Terminal {{{
   }
 }
 # }}}
-# variants {{{
-class ConioAP extends ConioBase {
+# base variants {{{
+class Conio_BaseAP extends Conio_Base {
   public int $async=1;
-  use Conio_A,Conio_P;
+  use Conio_BaseA,Conio_BaseP;
 }
-class ConioAD extends ConioBase {
+class Conio_BaseAD extends Conio_Base {
   public int $async=1;
-  use Conio_A,Conio_D;
+  use Conio_BaseA,Conio_BaseD;
 }
-class ConioSP extends ConioBase {
-  use Conio_P;
+class Conio_BaseSP extends Conio_Base {
+  use Conio_BaseP;
 }
-class ConioSD extends ConioBase {
-  use Conio_D;
+class Conio_BaseSD extends Conio_Base {
+  use Conio_BaseD;
 }
 # }}}
 ###

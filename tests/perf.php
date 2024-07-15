@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 # defs {{{
 namespace SM;
-extension_loaded('php_ds') || dl('php_ds.dll');
+#extension_loaded('php_ds') || dl('php_ds.dll');
 use
   Throwable,Ds\Vector,Ds\Deque,FFI,
   SplFixedArray,SplDoublyLinkedList,SplObjectStorage;
@@ -13,7 +13,110 @@ __DIR__.DIRECTORY_SEPARATOR.
   '..'.DIRECTORY_SEPARATOR.
   'autoload.php';
 ###
-
+###
+# }}}
+echo "&ref vs ->noref"; # {{{
+$n = 100000000;
+echo "\nn=$n\n";
+$obj = (new class {public int $test=1;});
+###
+echo "> ref(1): ";
+$t = hrtime(true);
+for ($i=0,$j=0; $i < $n; ++$i)
+{
+  if ($z = &$obj->pending)
+  {
+    if ($j > $z) {
+      $j = $z;
+    }
+    $j++;
+  }
+}
+echo Fx::hrtime_delta_ms($t)."ms\n";
+unset($z);
+###
+echo "> noref(1): ";
+$t = hrtime(true);
+for ($i=0,$j=0; $i < $n; ++$i)
+{
+  if ($obj->test)
+  {
+    if ($j > $obj->test) {
+      $j = $obj->test;
+    }
+    $j++;
+  }
+}
+echo Fx::hrtime_delta_ms($t)."ms\n";
+###
+echo "> noref+var(1): ";
+$t = hrtime(true);
+for ($i=0,$j=0; $i < $n; ++$i)
+{
+  if ($z = $obj->test)
+  {
+    if ($j > $z) {
+      $j = $z;
+    }
+    $j++;
+  }
+}
+echo Fx::hrtime_delta_ms($t)."ms\n";
+###
+###
+exit(0);
+# }}}
+echo "f(array) vs f(?array & !==)"; # {{{
+$n = 100000000;
+echo "\nn=$n\n";
+$f1 = (function(int $i, array $cfg):int {
+  if ($cfg) {$i++;}
+  else {$i--;}
+  return $i;
+});
+$f2 = (function(int $i, ?array $cfg):int {
+  if ($cfg !== null) {$i++;}
+  else {$i--;}
+  return $i;
+});
+$a = [];
+$b = null;
+$c = [1,2,3];
+###
+echo "> -f(array): ";
+$t = hrtime(true);
+for ($i=0,$j=0; $i < $n; ++$i)
+{
+  $f1($i, $a);
+}
+echo Fx::hrtime_delta_ms($t)."ms\n";
+###
+echo "> -f(?array): ";
+$t = hrtime(true);
+for ($i=0,$j=0; $i < $n; ++$i)
+{
+  $f2($i, $b);
+}
+echo Fx::hrtime_delta_ms($t)."ms\n";
+###
+echo "> +f(array): ";
+$t = hrtime(true);
+for ($i=0,$j=0; $i < $n; ++$i)
+{
+  $f1($i, $c);
+}
+echo Fx::hrtime_delta_ms($t)."ms\n";
+###
+echo "> +f(?array): ";
+$t = hrtime(true);
+for ($i=0,$j=0; $i < $n; ++$i)
+{
+  $f2($i, $c);
+}
+echo Fx::hrtime_delta_ms($t)."ms\n";
+###
+###
+exit(0);
 # }}}
 echo "expansive replacement: array_splice vs Ds\Deque vs SplDoublyLinkedList"; # {{{
 $n = 10000000;

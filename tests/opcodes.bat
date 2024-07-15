@@ -17,6 +17,6 @@
 ::php -d opcache.opt_debug_level=0x20000 -f "%CD%\..\sync.php" 2> sync.opcode
 ::php -d opcache.opt_debug_level=0x20000 -f "%CD%\..\conio.php" 2> conio.opcode
 ::php -d opcache.opt_debug_level=0x20000 -f "%CD%\..\promise.php" 2> promise.opcode
-php -d opcache.opt_debug_level=0x20000 -f "%CD%\..\fetch.php" 2> fetch.opcode
+php -d opcache.opt_debug_level=0x20000 -f "%CD%\..\hurl.php" 2> hurl.opcode
 
 exit

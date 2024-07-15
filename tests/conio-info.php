@@ -54,7 +54,7 @@ function input_cycle() # {{{
       echo "\n".ErrorLog::render($r);
       break;
     }
-    foreach ($r->value->events as $e)
+    foreach ($r->value as $e)
     {
       switch ($e[0]) {
       case Conio::EV_KEY:# {{{
@@ -195,7 +195,7 @@ Conio
 # }}}
 function show_info_sio():bool # {{{
 {
-  $B  = Conio::$BASE;
+  $B  = Conio::$GEAR->base;
   $m0 = $B->mode['sio'];
   $m1 = $B->sio;
   echo "\n\nOS specific terminal attributes/flags:";
@@ -360,7 +360,8 @@ function test_parser():bool # {{{
 function test_event_timeout():bool # {{{
 {
   echo "\n\n> sleeping 10 seconds..";
-  $n = (int)(Conio::$BASE->eventTimeout / 1000000000);
+  $n = Conio::$GEAR->base->inputTimeout;
+  $n = (int)($n / 1000000000);
   echo <<<TEXT
 
 >> INFO
@@ -395,30 +396,31 @@ TEXT;
 function parse8_error($e, $s, $end=-1): void # {{{
 {
   echo '>> '.$e.'.. ';
-  $B = Conio::$BASE;
-  $q = new \SplDoublyLinkedList();
+  $B = Conio::$GEAR->base;
+  $a = $B->input;
   $n = strlen($s);
   if (~$end)
   {
-    if ($B->parse8($q, $s, $n, 0)  !== $end ||
-        $B->parse8($q, $s, $n, $n) !== -1)
+    if ($B->parse8($s, $n, 0)  !== $end ||
+        $B->parse8($s, $n, $n) !== -1)
     {
       echo "fail (passed)\n";
       throw ErrorEx::skip();
     }
   }
-  elseif ($B->parse8($q, $s, $n, 0) !== -1)
+  elseif ($B->parse8($s, $n, 0) !== -1)
   {
     echo "fail (passed)\n";
     throw ErrorEx::skip();
   }
-  $err = $q->pop()[1];
+  $err = array_pop($B->input)[1];
   if (!preg_match("/$e/s", $err->message()))
   {
     echo "fail (not matched)\n";
     echo ErrorLog::render($err)."\n";
     throw ErrorEx::skip();
   }
+  $B->input = $a;
   echo "ok\n";
 }
 # }}}

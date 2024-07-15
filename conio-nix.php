@@ -3,10 +3,9 @@ namespace SM;
 use FFI,Throwable;
 use function
   function_exists,str_repeat,strlen,substr,strpos,
-  posix_strerror,usleep,
-  pcntl_async_signals,pcntl_signal;
+  posix_strerror,pcntl_async_signals,pcntl_signal;
 ###
-abstract class ConioBase extends ConioPseudo
+abstract class Conio_Base extends Conio_PseudoBase
 {
   # constants {{{
   const # termios {{{
@@ -274,8 +273,8 @@ abstract class ConioBase extends ConioPseudo
       $mode = self::get_mode($libc, $mem, $f0);
       # create specific instance
       $base = self::kd_type($libc, $mem, $f0)
-        ? new ConioKD($libc,$mem,$f0,$f1,$ds,$mode)
-        : new ConioPT($libc,$mem,$f0,$f1,$ds,$mode);
+        ? new Conio_BaseKD($libc,$mem,$f0,$f1,$ds,$mode)
+        : new Conio_BasePT($libc,$mem,$f0,$f1,$ds,$mode);
       ###
       # initialize
       $base->setMode($base::get_applied_mode($mode));
@@ -286,6 +285,9 @@ abstract class ConioBase extends ConioPseudo
       # restore/cleanup
       if ($base)
       {
+        # a little pause may help
+        # cleaning any input dirt
+        Loop::cooldown(100);
         $base->__destruct();
         $base = null;
       }
@@ -659,22 +661,20 @@ abstract class ConioBase extends ConioPseudo
       ? $this->env['TERM'] : '?';
   }
   # }}}
-  function gets(): string # {{{
+  function gets(int $timeout=0): string # {{{
   {
     # prepare
-    $timeout = $this->timeout;
+    $timeout || $timeout = $this->timeout;
     $api = $this->api;
     $mem = $this->varmem;
     $fd  = $this->f0;
     # wait for the input
     while (!($n = self::kbhit($api, $mem, $fd)))
     {
-      # check timed out
-      if (($timeout -= 10) < 0) {
-        return '';
+      if (($timeout -= 5) < 0) {
+        return '';# timed out
       }
-      # cooldown..
-      \sleep(0);usleep(10000);# 10ms
+      Loop::cooldown(5);
     }
     # read everything
     $s = '';
@@ -682,12 +682,10 @@ abstract class ConioBase extends ConioPseudo
     {
       if (!($m = self::get_input($api, $mem, $fd, $n)))
       {
-        # check timed out
-        if (($timeout -= 10) < 0) {
-          return '';
+        if (($timeout -= 5) < 0) {
+          return '';# timed out
         }
-        # cooldown
-        \sleep(0);usleep(10000);# 10ms
+        Loop::cooldown(5);
         continue;
       }
       $s .= FFI::string($mem, $m);
@@ -789,7 +787,7 @@ abstract class ConioBase extends ConioPseudo
     return true;
   }
   # }}}
-  function read(int $time): bool # {{{
+  function read(): bool # {{{
   {
     # prepare
     $api = $this->api;
@@ -817,10 +815,10 @@ abstract class ConioBase extends ConioPseudo
       return false;
     }
     # check pending partial
-    if ($i = strlen($this->partBuf))
+    if ($i = strlen($this->inputPart))
     {
       # join previous and current data
-      $s = $this->partBuf.FFI::string($mem, $n);
+      $s = $this->inputPart.FFI::string($mem, $n);
       $n = $n + $i;
       # seek the DA1 response that
       # marks the end of the partial
@@ -835,13 +833,13 @@ abstract class ConioBase extends ConioPseudo
         $k = strlen($r);
         $s = substr($s, 0, $j).substr($s, $k);
         $n = $n - $k;
-        $this->partBuf = '';
+        $this->inputPart = '';
       }
       else
       {
         # the DA1 is not arrived yet,
         # accumulate partial data and bail out
-        $this->partBuf = $s;
+        $this->inputPart = $s;
         return true;
       }
     }
@@ -851,27 +849,24 @@ abstract class ConioBase extends ConioPseudo
       $s = FFI::string($mem, $n);
       $j = 0;
     }
-    # prepare for parsing
+    # parse and accumulate events
     $c = $this->pending;
-    $q = $this->events;
-    $q->push(null);# add dummy
-    # parse and compose events
     $i = $this->s8c1t
-      ? $this->parse8($q, $s, $n, $j)
-      : $this->parse7($q, $s, $n, $j);
-    # complete parsing
-    $j = $this->setPending($c, $time);
+      ? $this->parse8($s, $n, $j)
+      : $this->parse7($s, $n, $j);
+    # parse complete
+    $j = $this->setPending($c);
     # check the result of parsing
     if ($i < 0)
     {
-      # it failed, extract and set last error
-      $this->error = $q[$j - 1][1];
+      # when failed, extract add last error
+      $this->error = $this->input[$j - 1][1];
     }
     elseif ($i < $n)
     {
       # upon incomplete/partial response,
       # store remaining bytes and request DA1
-      $this->partBuf = substr($s, $i);
+      $this->inputPart = substr($s, $i);
       $this->puts("\x1B[0c");
     }
     return true;
@@ -901,8 +896,11 @@ abstract class ConioBase extends ConioPseudo
   # }}}
   function close(): void # {{{
   {
-    $this->api->close($this->f0);
-    $this->api->close($this->f1);
+    $api = $this->api;
+    $api->tcflush($this->f0, 1);# TCIFLUSH
+    #$api->tcflush($this->f1, 2);# TCOFLUSH
+    $api->close($this->f0);
+    $api->close($this->f1);
   }
   # }}}
   ############
@@ -944,10 +942,10 @@ abstract class ConioBase extends ConioPseudo
   # }}}
   # }}}
 }
-class ConioPT extends ConioBase {
+class Conio_BasePT extends Conio_Base {
   # Pseudo Terminal (PT)
 }
-class ConioKD extends ConioBase
+class Conio_BaseKD extends Conio_Base
 {
   # TODO
   # Virtual Terminal (VT) / Keyboard Display (KD)

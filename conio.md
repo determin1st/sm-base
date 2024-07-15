@@ -21,7 +21,7 @@ is utilized on modern windows system.
 its methods return `SM\Promise` objects.
 
 
-## api spec
+## api
 <details>
 <summary><code>Conio::init(): ?<u>ErrorEx</u>
 </code></summary>

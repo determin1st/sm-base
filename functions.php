@@ -96,22 +96,30 @@ class Fx
   # }}}
 }
 Fx::$PROCESS_ID = (string)getmypid();
-function await(object|array $p): object # {{{
+function await(object $p): object # {{{
 {
-  return Loop::await(is_array($p)
-    ? Promise::Row($p)
-    : Promise::from($p)
-  );
+  return Loop::await($p);
 }
 # }}}
-function await_any(?object ...$p): int # {{{
+function await_all(object ...$p): array # {{{
 {
-  return Loop::await_any($p);
+  return Loop::await_all($p);
 }
 # }}}
-function sleep(int $ms): object # {{{
+function await_one(?object ...$p): ?object # {{{
 {
-  return Promise::Timeout($ms, new PromiseNop());
+  return Loop::await_any($p, true);
+}
+# }}}
+function await_any(?object ...$p): ?object # {{{
+{
+  return Loop::await_any($p, false);
+}
+# }}}
+function sleep(int $ms, ?object $f=null): object # {{{
+{
+  # TODO: check ms
+  return Promise::Delay($ms, Completable::from($f));
 }
 # }}}
 # ? {{{

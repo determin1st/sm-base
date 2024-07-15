@@ -3,17 +3,15 @@
 namespace SM;
 use Error,Throwable;
 use function
-  class_alias,set_error_handler,func_num_args,
+  set_error_handler,func_num_args,
   is_object,is_string,array_is_list,
   implode,explode,count,array_reverse,array_pop,
   array_shift,array_unshift,array_slice,
   date,intval,strval,trim,str_repeat,
   strpos,strrpos,substr;
-use const
-  DIRECTORY_SEPARATOR;
 ###
-require_once
-  __DIR__.DIRECTORY_SEPARATOR.'mustache.php';
+use const DIRECTORY_SEPARATOR;
+require_once __DIR__.DIRECTORY_SEPARATOR.'mustache.php';
 # }}}
 interface Loggable # {{{
 {
@@ -55,7 +53,7 @@ class ErrorEx extends Error # {{{
     3 => 'Fatal'
   ];
   # }}}
-  # constructors {{{
+  # basis {{{
   function __construct(
     public int     $level = 0,
     public array   $msg   = [],
@@ -64,6 +62,14 @@ class ErrorEx extends Error # {{{
   ) {
     parent::__construct('', -1);
     self::stringify($msg);
+  }
+  static function unexpected(int $n, string $s): bool
+  {
+    $name = isset(self::ERROR_NUM[$n])
+      ? self::ERROR_NUM[$n]
+      : '#'.$n.' UNKNOWN';
+    ###
+    throw new self(3, [$name, $s]);
   }
   static function skip(): self {
     return new self(0);
@@ -83,30 +89,8 @@ class ErrorEx extends Error # {{{
   static function trace(int $up=0): self {
     return new self(4, [], $up);
   }
-  private static function num(
-    int $n, string $msg, string $file, int $line
-  ):never
-  {
-    $s = isset(self::ERROR_NUM[$n])
-      ? self::ERROR_NUM[$n]
-      : '#'.$n.' UNKNOWN';
-    $m = [$s, $msg];
-    throw new self(3, $m);
-  }
   # }}}
   # stasis {{{
-  static function init(): bool # {{{
-  {
-    # set custom error handler that will throw
-    # any mild/syntax errors (warnings/notices/deprecations)
-    set_error_handler(self::num(...));
-    # set shorthand alias
-    return class_alias(
-      '\\'.__NAMESPACE__.'\\ErrorEx',
-      '\\'.__NAMESPACE__.'\\EE', false
-    );
-  }
-  # }}}
   static function from(# {{{
     ?object $e, bool $null=false
   ):?self
@@ -576,19 +560,19 @@ class ErrorLog implements Mustachable # {{{
 
         {{@trace}}
           {{^case}}
-            {{#text-trace-dir}}{{dir}}{{/}}
+            {{#trace-dir}}{{dir}}{{/}}
             {{file}}:{{line}}
           {{|1}}
             INTERNAL
             {:SP:}>{:SP:}
             {{function}}
           {{|2}}
-            {{#text-trace-dir}}{{dir}}{{/}}
+            {{#trace-dir}}{{dir}}{{/}}
             {{file}}:{{line}}
             {:SP:}>{:SP:}
             {{function}}
           {{|3}}
-            {{#text-trace-dir}}{{dir}}{{/}}
+            {{#trace-dir}}{{dir}}{{/}}
             {{file}}:{{line}}
             {:SP:}>{:SP:}
             {{class}}{{type}}{{function}}
@@ -1034,7 +1018,6 @@ class ErrorLog implements Mustachable # {{{
   const ITEM_HELPER=[# {{{
     # options
     'trace-dir'=>false,
-    'text-trace-dir'=>true,
     # assignable
     'level-tag'=>'',
     'level-color-0'=>'','level-color-1'=>'',
@@ -1047,7 +1030,8 @@ class ErrorLog implements Mustachable # {{{
     'msg-type'=>0,'msg-path'=>[],'msg-title'=>'','msg-block'=>[],
   ];
   # }}}
-  # singleton constructor {{{
+  ###
+  # basis {{{
   static self   $I;
   public object $mustache;
   public array  $template=[[],[]],$date=['',''];
@@ -1061,193 +1045,26 @@ class ErrorLog implements Mustachable # {{{
       ]
     ]);
   }
-  static function init(array $o=[]): void
+  static function _init(): void
   {
-    if (isset(self::$I))
-    {
-      $I = self::$I;
-      if (isset($o[$k = 'ansi'])) {
-        $I->index = $o[$k] ? 1 : 0;
-      }
-      if (isset($o[$k = 'trace-dir'])) {
-        $I->mustache->value($k, !!$o[$k]);
-      }
-      if (isset($o[$k = 'text-trace-dir'])) {
-        $I->mustache->value($k, !!$o[$k]);
-      }
-      $I->date = ['',''];
-    }
-    else {
-      self::$I = new self();
-    }
+    self::$I = new self();
   }
-  function __debugInfo(): array {
+  function __debugInfo(): array
+  {
     return ['index'=>$this->index];
   }
   # }}}
-  # lambdas {{{
-  const STASH = [
-    'assign' => 7+1,
-    'insert' => 7+1,
-    'slice'  => 7+4,
-    'COLOR'  => 7+1,
-    'REPEAT' => 7+1
-  ];
-  function assign(object $m, string $a): string # {{{
+  # stasis {{{
+  static function set(array $o): void # {{{
   {
-    # render primary section and
-    # assign result to the value in the stack
-    $m->value($a, $m->render());
-    return '';
-  }
-  # }}}
-  function insert(object $m, string $a): string # {{{
-  {
-    $i = $this->index;
-    $t = $this->getTemplate($a);
-    switch ($a) {
-    case 'time':# {{{
-      # create datetime helper
-      # get timestamp
-      if ($n = $m->value('.time'))
-      {
-        # parse and set variables
-        $a = explode('/', date('Y/m/d/H/i/s', $n));
-        $b = $a[0].$a[1].$a[2];
-        $c = [
-          'Y' => $a[0],
-          'M' => $a[1],
-          'D' => $a[2],
-          'h' => $a[3],
-          'm' => $a[4],
-          's' => $a[5],
-          'time' => true,
-          'date' => false,
-        ];
-        # set/display date when changed
-        if ($this->date[$i] !== $b)
-        {
-          $this->date[$i] = $b;
-          $c['date'] = true;
-        }
-      }
-      else {
-        $c = ['time' => false];
-      }
-      return $m->get($t, $c);
-      # }}}
-    case 'span':# {{{
-      # get duration
-      if (!($n = $m->value('.span'))) {
-        return '';
-      }
-      # prepare value and unit
-      if ($n > 9000000000)# whole seconds
-      {
-        $n = (int)($n / 1000000000);
-        $s = 's';
-      }
-      elseif ($n > 1000000)# nano => milli
-      {
-        $n = (int)($n / 1000000);
-        $s = 'ms';
-      }
-      elseif ($n > 1000)# nano => micro
-      {
-        $n = (int)($n / 1000);
-        $s = 'us';
-      }
-      else {
-        $s = 'ns';
-      }
-      # render
-      return $m->get($t, [
-        'time' => $n,
-        'unit' => $s,
-      ]);
-      # }}}
-    case 'logs':
-      return $m->get($t, $m->value('..'));
+    $I = self::$I;
+    if (isset($o[$k = 'ansi'])) {
+      $I->index = $o[$k] ? 1 : 0;
     }
-    return $m->get($t);
-  }
-  # }}}
-  function slice(object $m, string $a): array # {{{
-  {
-    $t = $this->getTemplate($a);
-    switch ($a) {
-    case 'item':
-      self::set_helper(
-        $m->value('..'),
-        $m->value('.')
-      );
-      break;
-    case 'logs':
-      return explode(
-        "\n", $m->get($t, $m->value('..'))
-      );
+    if (isset($o[$k = 'trace-dir'])) {
+      $I->mustache->value($k, !!$o[$k]);
     }
-    return explode("\n", $m->get($t));
-  }
-  # }}}
-  function COLOR(object $m, string $a): string # {{{
-  {
-    static $COLOR=[# {{{
-      'black'   => 30,
-      'red'     => 31,
-      'green'   => 32,
-      'yellow'  => 33,
-      'blue'    => 34,
-      'magenta' => 35,
-      'cyan'    => 36,
-      'white'   => 37,
-      'black-bright'   => 90,
-      'red-bright'     => 91,
-      'green-bright'   => 92,
-      'yellow-bright'  => 93,
-      'blue-bright'    => 94,
-      'magenta-bright' => 95,
-      'cyan-bright'    => 96,
-      'white-bright'   => 97,
-    ];
-    # }}}
-    $b = explode(',', $a);
-    $i = $COLOR[$b[0]];
-    $j = $COLOR[$b[1]] + 10;
-    return "\033[".$i.';'.$j.'m';
-  }
-  # }}}
-  function REPEAT(object $m, string $a): string # {{{
-  {
-    if (strpos($a, ','))
-    {
-      $b = explode(',', $a);
-      $i = intval($b[1]);
-      $a = $b[0];
-    }
-    else {
-      $i = 1;
-    }
-    return str_repeat($a, $i);
-  }
-  # }}}
-  # }}}
-  function getTemplate(string $k): int # {{{
-  {
-    # check prepared
-    $i = $this->index;
-    if (isset($this->template[$i][$k])) {
-      return $this->template[$i][$k];
-    }
-    # check not exists
-    if (!isset(self::TEMPLATE[$i][$k])) {
-      return 0;
-    }
-    # prepare, store and complete
-    return $this->template[$i][$k] =
-    $this->mustache->prep(
-      self::TEMPLATE[$i][$k], '{: :}'
-    );
+    $I->date = ['',''];
   }
   # }}}
   static function set_helper(# {{{
@@ -1330,7 +1147,7 @@ class ErrorLog implements Mustachable # {{{
     $I = self::$I;
     $m = $I->mustache;
     return $m->get(
-      $I->getTemplate('root'),
+      $I->template('root'),
       self::set_helper($m->value('.'), $item)
     );
   }
@@ -1338,7 +1155,7 @@ class ErrorLog implements Mustachable # {{{
   static function all(array $a): string # {{{
   {
     $I = self::$I;
-    $t = $I->getTemplate('root');
+    $t = $I->template('root');
     $m = $I->mustache;
     $h = &$m->value('.');
     for ($x='',$i=0,$j=count($a); $i < $j; ++$i) {
@@ -1352,7 +1169,174 @@ class ErrorLog implements Mustachable # {{{
     return self::one(ErrorEx::trace($up + 1)->log());
   }
   # }}}
+  # }}}
+  # mustachable {{{
+  const STASH = [
+    'assign' => 7+1,
+    'insert' => 7+1,
+    'slice'  => 7+4,
+    'COLOR'  => 7+1,
+    'REPEAT' => 7+1
+  ];
+  function assign(object $m, string $a): string # {{{
+  {
+    # render primary section and
+    # assign result to the value in the stack
+    $m->value($a, $m->render());
+    return '';
+  }
+  # }}}
+  function insert(object $m, string $a): string # {{{
+  {
+    $i = $this->index;
+    $t = $this->template($a);
+    switch ($a) {
+    case 'time':# {{{
+      # create datetime helper
+      # get timestamp
+      if ($n = $m->value('.time'))
+      {
+        # parse and set variables
+        $a = explode('/', date('Y/m/d/H/i/s', $n));
+        $b = $a[0].$a[1].$a[2];
+        $c = [
+          'Y' => $a[0],
+          'M' => $a[1],
+          'D' => $a[2],
+          'h' => $a[3],
+          'm' => $a[4],
+          's' => $a[5],
+          'time' => true,
+          'date' => false,
+        ];
+        # set/display date when changed
+        if ($this->date[$i] !== $b)
+        {
+          $this->date[$i] = $b;
+          $c['date'] = true;
+        }
+      }
+      else {
+        $c = ['time' => false];
+      }
+      return $m->get($t, $c);
+      # }}}
+    case 'span':# {{{
+      # get duration
+      if (!($n = $m->value('.span'))) {
+        return '';
+      }
+      # prepare value and unit
+      if ($n > 9000000000)# whole seconds
+      {
+        $n = (int)($n / 1000000000);
+        $s = 's';
+      }
+      elseif ($n > 1000000)# nano => milli
+      {
+        $n = (int)($n / 1000000);
+        $s = 'ms';
+      }
+      elseif ($n > 1000)# nano => micro
+      {
+        $n = (int)($n / 1000);
+        $s = 'us';
+      }
+      else {
+        $s = 'ns';
+      }
+      # render
+      return $m->get($t, [
+        'time' => $n,
+        'unit' => $s,
+      ]);
+      # }}}
+    case 'logs':
+      return $m->get($t, $m->value('..'));
+    }
+    return $m->get($t);
+  }
+  # }}}
+  function slice(object $m, string $a): array # {{{
+  {
+    $t = $this->template($a);
+    switch ($a) {
+    case 'item':
+      self::set_helper(
+        $m->value('..'),
+        $m->value('.')
+      );
+      break;
+    case 'logs':
+      return explode(
+        "\n", $m->get($t, $m->value('..'))
+      );
+    }
+    return explode("\n", $m->get($t));
+  }
+  # }}}
+  function COLOR(object $m, string $a): string # {{{
+  {
+    static $COLOR=[
+      'black'   => 30,
+      'red'     => 31,
+      'green'   => 32,
+      'yellow'  => 33,
+      'blue'    => 34,
+      'magenta' => 35,
+      'cyan'    => 36,
+      'white'   => 37,
+      'black-bright'   => 90,
+      'red-bright'     => 91,
+      'green-bright'   => 92,
+      'yellow-bright'  => 93,
+      'blue-bright'    => 94,
+      'magenta-bright' => 95,
+      'cyan-bright'    => 96,
+      'white-bright'   => 97,
+    ];
+    $b = explode(',', $a);
+    $i = $COLOR[$b[0]];
+    $j = $COLOR[$b[1]] + 10;
+    return "\033[".$i.';'.$j.'m';
+  }
+  # }}}
+  function REPEAT(object $m, string $a): string # {{{
+  {
+    if (strpos($a, ','))
+    {
+      $b = explode(',', $a);
+      $i = intval($b[1]);
+      $a = $b[0];
+    }
+    else {
+      $i = 1;
+    }
+    return str_repeat($a, $i);
+  }
+  # }}}
+  function template(string $k): int # {{{
+  {
+    # check already prepared
+    $i = $this->index;
+    if (isset($this->template[$i][$k])) {
+      return $this->template[$i][$k];
+    }
+    # check not exists
+    if (!isset(self::TEMPLATE[$i][$k])) {
+      return 0;
+    }
+    # prepare, store and complete
+    return $this->template[$i][$k] =
+    $this->mustache->prep(
+      self::TEMPLATE[$i][$k], '{: :}'
+    );
+  }
+  # }}}
+  # }}}
 }
 # }}}
-return ErrorEx::init() && ErrorLog::init();
+###
+set_error_handler(ErrorEx::unexpected(...));
+ErrorLog::_init();
 ###

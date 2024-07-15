@@ -6,14 +6,14 @@ require_once
   __DIR__.DIRECTORY_SEPARATOR.
   'functions.php';
 ###
-defined('SM\\BASE') || define('SM\\BASE', new class()
+defined('SM\\AUTO') || define('SM\\AUTO', new class()
 {
   const DIR=__DIR__.DIRECTORY_SEPARATOR;
   const MAP=[
     'SM\\Conio'        => 'conio.php',
     'SM\\ErrorEx'      => 'error.php',
     'SM\\ErrorLog'     => 'error.php',
-    'SM\\Fetch'        => 'fetch.php',
+    'SM\\Hurl'         => 'hurl.php',
     'SM\\Promise'      => 'promise.php',
     'SM\\Loop'         => 'promise.php',
     'SM\\SyncExchange' => 'sync.php',
@@ -39,5 +39,5 @@ defined('SM\\BASE') || define('SM\\BASE', new class()
     );
   }
 });
-return (\SM\BASE)->register();
+return (AUTO)->register();
 ###
