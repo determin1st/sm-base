@@ -850,17 +850,22 @@ abstract class Conio_Base extends Conio_PseudoBase
       $j = 0;
     }
     # parse and accumulate events
-    $c = $this->pending;
     $i = $this->s8c1t
       ? $this->parse8($s, $n, $j)
       : $this->parse7($s, $n, $j);
-    # parse complete
-    $j = $this->setPending($c);
-    # check the result of parsing
+    # update indexes
+    if (!$this->setPending())
+    {
+      throw ErrorEx::fatal(
+        'incorrect parse behaviour'
+      );
+    }
+    # check the result
     if ($i < 0)
     {
-      # when failed, extract add last error
-      $this->error = $this->input[$j - 1][1];
+      # set last error
+      $j = $this->inputCount - 1;
+      $this->error = $this->input[$j][1];
     }
     elseif ($i < $n)
     {

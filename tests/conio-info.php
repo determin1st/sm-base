@@ -54,11 +54,11 @@ function input_cycle() # {{{
       echo "\n".ErrorLog::render($r);
       break;
     }
+    # display all events
     foreach ($r->value as $e)
     {
       switch ($e[0]) {
       case Conio::EV_KEY:# {{{
-        # display {{{
         $k = $e[2];
         $m = $e[3];
         if ($k)
@@ -87,22 +87,9 @@ function input_cycle() # {{{
           }
           echo '['.$e[1].'*'.$s."]";
         }
-        else
-        {
+        else {
           echo '{'.$e[1].'*'.$e[4].'}';
         }
-        # }}}
-        # handle
-        if ($k === Conio::K_Q && ($m & Conio::KM_CTRL)) {
-          break 3;
-        }
-        $e[1] && !$m && $prompt = match ($k) {
-          Conio::K_0 => show_info_sio(),
-          Conio::K_1 => test_readch(),
-          Conio::K_2 => test_parser(),
-          Conio::K_3 => test_event_timeout(),
-          default => false
-        };
         break;
         # }}}
       case Conio::EV_MOUSE:# {{{
@@ -153,6 +140,31 @@ function input_cycle() # {{{
         echo '?';
         var_dump($e);
         break;
+      }
+    }
+    # handle one
+    foreach ($r->value as $e)
+    {
+      if ($e[0] === Conio::EV_KEY && $e[1])
+      {
+        $k = $e[2];
+        $m = $e[3];
+        ###
+        if ($k === Conio::K_Q &&
+            ($m & Conio::KM_CTRL))
+        {
+          break 2;
+        }
+        !$m && $prompt = match ($k) {
+          Conio::K_0 => show_info_sio(),
+          Conio::K_1 => test_readch(),
+          Conio::K_2 => test_parser(),
+          Conio::K_3 => test_event_timeout(),
+          default => false
+        };
+        if ($prompt) {
+          break;
+        }
       }
     }
   }

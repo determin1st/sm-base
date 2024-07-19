@@ -726,9 +726,10 @@ class Conio_Gear extends Completable # {{{
       if ($time > $this->nextWrite)
       {
         $base->write();
-        $this->lastActive = $time;
-        $this->nextWrite  = $time + self::WRITE_INTERVAL;
         $wrote = true;
+        $this->lastActive = $time;
+        $this->nextWrite  =
+          $time + self::WRITE_INTERVAL;
       }
     }
     elseif ($this->drainerCount && !$base->writing)
@@ -751,8 +752,8 @@ class Conio_Gear extends Completable # {{{
       $resized = false;
     }
     # read
-    if (($base->read() || $resized) &&
-        $this->readerCount)
+    if (($base->read() || $resized ||
+         $base->pending) && $this->readerCount)
     {
       # get events and wakeup event readers
       $this->events = $base->getEvents();
@@ -1244,7 +1245,8 @@ abstract class Conio_PseudoBase # {{{
     $devAttr='',$devId='',$id='',
     $inputPart='',$writeBuf1='',$writeBuf2='';
   public int
-    $inputShift1=0,$inputShift2=0,$pending=0,
+    $inputCount=0,$inputShift=0,$pending=0,
+    $inputTimeIdx=0,# inputTime[] and inputGroup[]
     $inputTimeout=3*1000000000,# ns, decomposition
     $timeout=500,# ms, approximate response
     $async=0,$ansi=0,$s8c1t=0,
@@ -1784,31 +1786,28 @@ abstract class Conio_PseudoBase # {{{
     $this->focused = $i ? 1 : 0;
   }
   # }}}
-  function setPending(int $i): int # {{{
+  function setPending(): bool # {{{
   {
-    # to determine group size,
-    # substract initial from current count
-    $c = count($this->input) - $this->inputShift2;
-    if (($n = $c - $i) <= 0) {
-      return $c;
+    # determine new group size
+    $m = $this->inputCount;
+    $n = count($this->input);
+    if (($i = $n - $m) <= 0) {
+      return false;
     }
-    # set group size and expiration time
-    $this->inputSize[] = $n;
+    # set count, group size and expiration time
+    $this->inputCount  = $n;
+    $this->inputSize[] = $i;
     $this->inputTime[] =
       Loop::$HRTIME + $this->inputTimeout;
-    # update current and complete
-    return $this->pending = $c;
+    # update pending and complete
+    $this->pending += $i;
+    return true;
   }
   # }}}
   function clearInput(): void # {{{
   {
-    $this->inputPart   = '';
-    $this->inputTime   = [];
-    $this->inputSize   = [];
-    $this->input       = [];
-    $this->inputShift1 = 0;
-    $this->inputShift2 = 0;
-    $this->pending     = 0;
+    $this->inputPart = '';
+    $this->inputClear();
   }
   # }}}
   function clearOutput(): void # {{{
@@ -1841,6 +1840,17 @@ abstract class Conio_PseudoBase # {{{
     # cleanup
     $this->writeBuf1 = $this->writeBuf2 = '';
     $this->writeLen1 = $this->writeLen2 = 0;
+  }
+  # }}}
+  function inputClear(): void # {{{
+  {
+    $this->inputTime = [];
+    $this->inputSize = [];
+    $this->input     = [];
+    $this->inputTimeIdx = 0;
+    $this->inputCount   = 0;
+    $this->inputShift   = 0;
+    $this->pending      = 0;
   }
   # }}}
   # }}}
@@ -2900,19 +2910,14 @@ abstract class Conio_PseudoBase # {{{
     # add input events
     if ($this->pending)
     {
-      # extract fresh
-      $b = ($i = $this->inputShift2)
+      # extract
+      $b = ($i = $this->inputShift)
         ? array_slice($this->input, $i)
         : $this->input;
       # add
       $a = array_merge($a, $b);
       # cleanup
-      $this->inputShift1 = 0;
-      $this->inputShift2 = 0;
-      $this->pending     = 0;
-      $this->inputTime   = [];
-      $this->inputSize   = [];
-      $this->input       = [];
+      $this->inputClear();
     }
     # complete
     return $a;
@@ -3018,46 +3023,48 @@ abstract class Conio_PseudoBase # {{{
   # }}}
   function refresh(int $time): self # {{{
   {
-    # check no pending input
-    if (!($n = $this->pending)) {
+    # check empty
+    if (!($n = $this->inputCount)) {
       return $this;
     }
-    # check the first fresh group is staled
-    $i = $this->inputShift1;
-    if ($time < $this->inputTime[$i]) {
-      return $this;
-    }
-    # seek to the first fresh
-    $k = 0;
-    do {
-      $k += $this->inputSize[$i++];
-    }
-    while ($k < $n && $this->inputTime[$i] < $time);
-    # update indexes
-    $this->inputShift1 = $i;
-    $this->inputShift2 = $j = $this->inputShift2 + $k;
-    $this->pending     = $n = $n - $k;
-    # decompose reasonable amount
-    if ($j > 100)
+    # check pending
+    $i = $this->inputShift;
+    while ($k = $this->pending)
     {
-      if ($n)
-      {
-        $this->inputTime = array_slice(
-          $this->inputTime, $i
-        );
-        $this->inputSize = array_slice(
-          $this->inputSize, $i
-        );
-        $this->input = array_slice($this->input, $j);
+      # check first group is still fresh
+      $j = $this->inputTimeIdx;
+      if ($this->inputTime[$j] > $time) {
+        break;
       }
-      else
-      {
-        $this->inputTime = [];
-        $this->inputSize = [];
-        $this->input = [];
-      }
+      # shift to the next group that is fresh
+      do {$i += $this->inputSize[$j++];}
+      while ($i < $n && $this->inputTime[$j] < $time);
+      # update indexes and pending count
+      $this->inputShift   = $i;
+      $this->inputTimeIdx = $j;
+      $this->pending      = $k = $n - $i;
+      break;
     }
-    # complete
+    # chech decomposition threshold (not yet)
+    if ($i < 100) {
+      return $this;
+    }
+    # decompose
+    if ($k)
+    {
+      $this->inputTime = array_slice($this->inputTime, $j);
+      $this->inputSize = array_slice($this->inputSize, $j);
+      $this->input = array_slice($this->input, $i);
+    }
+    else
+    {
+      $this->inputTime = [];
+      $this->inputSize = [];
+      $this->input = [];
+    }
+    $this->inputCount   = $n - $i;
+    $this->inputShift   = 0;
+    $this->inputTimeIdx = 0;
     return $this;
   }
   # }}}

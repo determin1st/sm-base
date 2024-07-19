@@ -744,11 +744,10 @@ abstract class Conio_Base extends Conio_PseudoBase
       );
       return true;
     }
-    # prepare for parsing
-    $r = self::get_input($api, $mem, $i, $n);
-    $c = $this->pending;
     # parse records
-    for ($s='',$i=0; $i < $n; ++$i)
+    $r = self::get_input($api, $mem, $i, $n);
+    $s = '';
+    for ($i=0; $i < $n; ++$i)
     {
       $e = $r[$i];
       switch ($j = $e->EventType) {
@@ -861,7 +860,7 @@ abstract class Conio_Base extends Conio_PseudoBase
       }
     }
     # complete
-    return $this->setPending($c) > $c;
+    return $this->setPending();
   }
   # }}}
   function resize(): bool # {{{
