@@ -14,16 +14,17 @@ $promise = \SM\sleep(2000);# ~0 seconds
 
 the bluff is clearly illustrated above.
 although both functions look similar and
-have the same purpose, only synchronous did
-all the job intended.
+have the same purpose, only synchronous variant
+did all the job intended.
 
-refined asynchronous variants usually return
-something like promise of completion (passive) or
-means of observation (active)..
-anyway, it does only preparation for the job or
-little part of the job.
+***high level asynchronicity*** returns
+something like promise (aka promise of completion) or
+a future (aka future observer) object
+and only does preparation for the job or
+a little part of the job -
+that's why it returns blazingly fast.
 
-head to head speed comparison
+adequate head to head comparison
 will always be after synchronous variant:
 ```php
 $t1 = hrtime(true);
@@ -39,27 +40,32 @@ $t2 = hrtime(true);
 $t2 = hrtime(true) - $t2;
 
 if ($t1 < $t2) {
-  echo "ASYNCHRONOUS IS FASTER!";
+  echo "ASYNCHRONOUS IS FASTER!";# unlikely
 }
 ```
-there might be a chance of the quirk
-in synchronous sleep, so the message appears,
-but generally - not,
-because any correct asynchronous job has
-***more overhead*** than its synchronous variant,
-thus completes slower.
-there is not much sense in async VS sync comparisons,
-measuring the overhead is a nice method
-to battle different async implementations.
+every correct asynchronous job has
+***more overhead*** than its synchronous counterpart,
+thus it is slower.
+there might be a chance of a quirk/fluctuation
+in synchronous job that will add to its completion time,
+but generally - not.
+so, async VS sync comparisons
+may only highlight the burden of overhead.
 
-the next drop is that asynchronous
-means non-blocking and non-blocking means -
-heck your sleeps, its not a real IO,
-the real IO - is where async truly shines
-with the speed and stuff.
+another sloppy term is the non-blocking function or
+non-blocking function call.
+when imaginary cpu executor dives in and out,
+it leaves current scope, stresses the call stack
+and gets back, so technically, the "blocking" or
+the delay - always happens.
 
-imagine a cpu executor as a row in a debugger,
-it meets with a function, dives in and out..
+`O_NONBLOCK` and `O_NDELAY` flags
+are
+
+is similar to
+high level asynchronicity 
+
+..
 this blocks the execution of the current scope;
 stressing the call stack alone -
 doesnt produce asynchronous behaviour,
@@ -172,9 +178,6 @@ capable of asynchronous operation.
 every promise is a container of actions
 that "tick" in the loop.
 
-## await in await / nested loops
-...
-
 ## asynchroni(ci)ty for masses!
 ...
 heard of promisification?
@@ -182,7 +185,15 @@ heard of promisification?
 ## iterators
 ...
 
-## obscure iterators (fibers)
+## iterators squared (fibers)
+...
+
+## await in await ~ nested loop
+initially, javascript didn't have top level await,
+browser simply doesn't have "top level" and the
+NODEJS followed.
+
+## promise chaining and offloading
 ...
 
 
@@ -200,7 +211,7 @@ for example `\SM\sleep` shall do the impact of delay,
 but there is no necessity in checking,
 same as synchronous `usleep` returns `void`.
 
-# immediate promise controls
+# immediate control
 ## repeatition
 ...
 ## delays

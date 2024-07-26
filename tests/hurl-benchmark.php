@@ -311,6 +311,7 @@ while ($ch = show_menu())
     ###
     show_avg($avg, $what);
     show_p($rnk, $what);
+    echo "NOTE: SM\\Hurl is not alone, SM\\Conio is also rotated in the loop\n";
     break;
   # }}}
   case 'l':# {{{
@@ -434,6 +435,8 @@ function test_exec($list, $n, $delay, $buckets): array # {{{
         if (!$fit) {
           $rnk[$k][$max]++;
         }
+        ### better separation?
+        \gc_collect_cycles();
       }
     }
     echo "\n";

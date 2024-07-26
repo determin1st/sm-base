@@ -14,6 +14,7 @@ defined('SM\\AUTO') || define('SM\\AUTO', new class()
     'SM\\ErrorEx'      => 'error.php',
     'SM\\ErrorLog'     => 'error.php',
     'SM\\Hurl'         => 'hurl.php',
+    'SM\\Process'      => 'process.php',
     'SM\\Promise'      => 'promise.php',
     'SM\\Loop'         => 'promise.php',
     'SM\\SyncExchange' => 'sync.php',

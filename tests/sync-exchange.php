@@ -93,7 +93,7 @@ TEXT;
       ->okay(
         server_handler(...)
       )
-      ->whenDone(function($r) {
+      ->then(function($r) {
         if ($r->isCancelled) {
           echo "> server cancelled\n";
         }

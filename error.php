@@ -23,6 +23,7 @@ interface Loggable # {{{
   # logs  => [..]
   ###
   function log(): array;
+  function logLevel(): int;
 }
 # }}}
 class ErrorEx extends Error # {{{
@@ -118,10 +119,11 @@ class ErrorEx extends Error # {{{
   # }}}
   static function value(object $e): self # {{{
   {
-    $msg = [];
     return ($e instanceof Throwable)
-      ? new self(3, $msg, $e)
-      : new self(0, $msg, $e);
+      ? new self(3, [], $e)
+      : (($e instanceof Loggable)
+        ? new self($e->logLevel(), [], $e)
+        : new self(0, [], $e));
   }
   # }}}
   static function chain(?object ...$ee): self # {{{
@@ -347,12 +349,20 @@ class ErrorEx extends Error # {{{
     ];
   }
   # }}}
+  function logLevel(): int # {{{
+  {
+    return $this->level;
+  }
+  # }}}
   function logSelf(): array # {{{
   {
     switch ($this->level) {
     case 0:
     case 1:
     case 2:
+      if ($this->value instanceof Loggable) {
+        return $this->value->log();
+      }
       return [
         'level' => $this->level,
         'msg'   => $this->msg
@@ -930,17 +940,13 @@ class ErrorLog implements Mustachable # {{{
 
         {{^msg-type}}
           {{level-color-1}}●{:end-color:}
-          {{#has-logs}}
-            {:BR:}
-            {{insert logs}}
-          {{/}}
         {{|}}
           {{level-color-1}}▪{:end-color:}
           {{insert message}}
-          {{#has-logs}}
-            {:BR:}
-            {{insert logs}}
-          {{/}}
+        {{/}}
+        {{#has-logs}}
+          {:BR:}
+          {{insert logs}}
         {{/}}
 
       ',
@@ -1053,122 +1059,6 @@ class ErrorLog implements Mustachable # {{{
   {
     return ['index'=>$this->index];
   }
-  # }}}
-  # stasis {{{
-  static function set(array $o): void # {{{
-  {
-    $I = self::$I;
-    if (isset($o[$k = 'ansi'])) {
-      $I->index = $o[$k] ? 1 : 0;
-    }
-    if (isset($o[$k = 'trace-dir'])) {
-      $I->mustache->value($k, !!$o[$k]);
-    }
-    $I->date = ['',''];
-  }
-  # }}}
-  static function set_helper(# {{{
-    array &$h, array $item
-  ):array
-  {
-    # determine message count
-    $n = isset($item['msg'])
-      ? count($item['msg'])
-      : 0;
-    # set easy flags
-    $h['has-logs'] = (
-      isset($item['logs']) &&
-      count($item['logs']) > 0
-    );
-    $h['has-trace'] = $hasTrace =
-      isset($item['trace']);
-    # check no message
-    if (!$n)
-    {
-      # trace as message?
-      $h['has-msg-block'] = false;
-      $h['msg-type'] = $hasTrace ? 2 : 0;
-      return $item;
-    }
-    # analyze the message
-    $m = $item['msg'];
-    $s = $m[$n - 1];
-    if (($i = strpos($s, "\n")) === false)
-    {
-      # not multiline,
-      # a path or a path with the trace
-      $h['has-msg-block'] = false;
-      $h['msg-type'] = $hasTrace ? 3 : 1;
-      $h['msg-path'] = $m;
-      return $item;
-    }
-    # multiline!
-    $h['has-msg-block'] = true;
-    if ($n < 2)
-    {
-      $h['msg-type']  = 2;
-      $h['msg-path']  = [];
-    }
-    else
-    {
-      $h['msg-type'] = 3;
-      $h['msg-path'] = array_slice($m, 0, $n - 1);
-    }
-    $h['msg-block'] = explode("\n", trim($s));
-    return $item;
-  }
-  # }}}
-  static function render(# {{{
-    object|array $a, bool $ansi=false
-  ):string
-  {
-    if (is_object($a)) {
-      $a = $a->log();
-    }
-    if (func_num_args() > 1)
-    {
-      $I = self::$I;
-      $i = $I->index;
-      $I->index = $ansi ? 1 : 0;
-      $s = array_is_list($a)
-        ? self::all($a)
-        : self::one($a);
-      ###
-      $I->index = $i;
-      return $s;
-    }
-    return array_is_list($a)
-      ? self::all($a)
-      : self::one($a);
-  }
-  # }}}
-  static function one(array $item): string # {{{
-  {
-    $I = self::$I;
-    $m = $I->mustache;
-    return $m->get(
-      $I->template('root'),
-      self::set_helper($m->value('.'), $item)
-    );
-  }
-  # }}}
-  static function all(array $a): string # {{{
-  {
-    $I = self::$I;
-    $t = $I->template('root');
-    $m = $I->mustache;
-    $h = &$m->value('.');
-    for ($x='',$i=0,$j=count($a); $i < $j; ++$i) {
-      $x .= $m->get($t, self::set_helper($h, $a[$i]));
-    }
-    return $x;
-  }
-  # }}}
-  static function trace(int $up=0): string # {{{
-  {
-    return self::one(ErrorEx::trace($up + 1)->log());
-  }
-  # }}}
   # }}}
   # mustachable {{{
   const STASH = [
@@ -1331,6 +1221,127 @@ class ErrorLog implements Mustachable # {{{
     $this->mustache->prep(
       self::TEMPLATE[$i][$k], '{: :}'
     );
+  }
+  # }}}
+  # }}}
+  # stasis {{{
+  static function set(array $o): void # {{{
+  {
+    $I = self::$I;
+    if (isset($o[$k = 'ansi'])) {
+      $I->index = $o[$k] ? 1 : 0;
+    }
+    if (isset($o[$k = 'trace-dir'])) {
+      $I->mustache->value($k, !!$o[$k]);
+    }
+    $I->date = ['',''];
+  }
+  # }}}
+  static function set_helper(# {{{
+    array &$h, array $item
+  ):array
+  {
+    # determine message count
+    $n = isset($item['msg'])
+      ? count($item['msg'])
+      : 0;
+    # set easy flags
+    $h['has-logs'] = (
+      isset($item['logs']) &&
+      count($item['logs']) > 0
+    );
+    $h['has-trace'] = $hasTrace =
+      isset($item['trace']);
+    # check no message
+    if (!$n)
+    {
+      # trace as message?
+      $h['has-msg-block'] = false;
+      $h['msg-type'] = $hasTrace ? 2 : 0;
+      return $item;
+    }
+    # analyze the message
+    $m = $item['msg'];
+    $s = $m[$n - 1];
+    if (($i = strpos($s, "\n")) === false)
+    {
+      # not multiline,
+      # a path or a path with the trace
+      $h['has-msg-block'] = false;
+      $h['msg-type'] = $hasTrace ? 3 : 1;
+      $h['msg-path'] = $m;
+      return $item;
+    }
+    # multiline!
+    $h['has-msg-block'] = true;
+    if ($n < 2)
+    {
+      $h['msg-type']  = 2;
+      $h['msg-path']  = [];
+    }
+    else
+    {
+      $h['msg-type'] = 3;
+      $h['msg-path'] = array_slice($m, 0, $n - 1);
+    }
+    $h['msg-block'] = explode("\n", trim($s));
+    return $item;
+  }
+  # }}}
+  static function render(# {{{
+    object|array $a, bool $ansi=false
+  ):string
+  {
+    if (is_object($a)) {
+      $a = $a->log();
+    }
+    if (func_num_args() > 1)
+    {
+      $I = self::$I;
+      $i = $I->index;
+      $I->index = $ansi ? 1 : 0;
+      $s = array_is_list($a)
+        ? self::all($a)
+        : self::one($a);
+      ###
+      $I->index = $i;
+      return $s;
+    }
+    return array_is_list($a)
+      ? self::all($a)
+      : self::one($a);
+  }
+  # }}}
+  static function one(array $item): string # {{{
+  {
+    $I = self::$I;
+    $m = $I->mustache;
+    return $m->get(
+      $I->template('root'),
+      self::set_helper($m->value('.'), $item)
+    );
+  }
+  # }}}
+  static function all(array $a): string # {{{
+  {
+    $I = self::$I;
+    $t = $I->template('root');
+    $m = $I->mustache;
+    $h = &$m->value('.');
+    for ($x='',$i=0,$j=count($a); $i < $j; ++$i)
+    {
+      $b = is_object($a[$i])
+        ? $a[$i]->log()
+        : $a[$i];
+      ###
+      $x .= $m->get($t, self::set_helper($h, $b));
+    }
+    return $x;
+  }
+  # }}}
+  static function trace(int $up=0): string # {{{
+  {
+    return self::one(ErrorEx::trace($up + 1)->log());
   }
   # }}}
   # }}}

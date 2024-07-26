@@ -1000,7 +1000,7 @@ class Hurl_Action extends Contextable # {{{
       $this->_gear->actionDetach($this);
     }
     $this->_stage = 0;
-    $this->result->promiseContextClear($this);
+    $this->result->promiseContextClear();
     return true;
   }
   # }}}

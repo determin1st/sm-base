@@ -118,8 +118,7 @@ function await_any(?object ...$p): ?object # {{{
 # }}}
 function sleep(int $ms, ?object $f=null): object # {{{
 {
-  # TODO: check ms
-  return Promise::Delay($ms, Completable::from($f));
+  return Promise::Delay($ms, $f);
 }
 # }}}
 # ? {{{

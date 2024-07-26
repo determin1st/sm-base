@@ -20,6 +20,7 @@ require_once __DIR__.DIRECTORY_SEPARATOR.(
 # }}}
 class Conio # {{{
 {
+  # TODO: keep base not gear here
   # TODO: default color management/info api
   const # {{{
     # event types {{{
@@ -522,10 +523,9 @@ class Conio # {{{
     # the gear of asynchronicity
     try
     {
-      self::$GEAR = $e = Loop::gear(
-        new Conio_Gear(Conio_Base::new())
-      );
-      ErrorLog::set(['ansi' => $e->base->ansi]);
+      $base = Conio_Base::new();
+      self::$GEAR = Loop::gear(new Conio_Gear($base));
+      ErrorLog::set(['ansi' => $base->ansi]);
       $e = null;
     }
     catch (Throwable $e) {
@@ -575,7 +575,33 @@ class Conio # {{{
     return self::$GEAR->base->size;
   }
   # }}}
-  # promise factory {{{
+  # setters {{{
+  static function clear(): void {
+    self::$GEAR->base->clearOutput();
+  }
+  static function set(string $option, int|bool $v): void
+  {
+    $base = self::$GEAR->base;
+    switch ($option) {
+    case 'buffering':
+      if ($v)
+      {
+        if ($base->buffering === -1)
+        {
+          $base->buffering = 0;
+          $base->setBuffering();
+        }
+      }
+      elseif ($base->buffering > 0)
+      {
+        $base->setBuffering();
+        $base->buffering = -1;
+      }
+      break;
+    }
+  }
+  # }}}
+  # factory {{{
   static function drain(): object {
     return new Promise(new Conio_DrainOp(self::$GEAR));
   }
@@ -587,9 +613,6 @@ class Conio # {{{
     return new Promise(
       new Conio_ReadChar(self::$GEAR)
     );
-  }
-  static function clear(): void {
-    self::$GEAR->base->clearOutput();
   }
   # }}}
 }
@@ -716,8 +739,8 @@ class Conio_Gear extends Completable # {{{
   function dispatch(): bool # {{{
   {
     # refresh event storage
-    $time = Loop::$HRTIME;
-    $base = $this->base->refresh($time);
+    $time  = Loop::$HRTIME;
+    $base  = $this->base->refresh($time);
     $wrote = false;
     # write output
     if ($base->writeLen1)
@@ -761,9 +784,9 @@ class Conio_Gear extends Completable # {{{
         $o->result->promiseWakeup();
       }
       # cleanup and complete
-      $this->readers = [];
+      $this->readers     = [];
       $this->readerCount = 0;
-      $this->lastActive = $time;
+      $this->lastActive  = $time;
       return true;
     }
     # complete
@@ -828,7 +851,7 @@ class Conio_ReadOp extends Contextable # {{{
       if ($this->stage === 2) {
         $this->gear->detachReader($this);
       }
-      $this->result->promiseContextClear($this);
+      $this->result->promiseContextClear();
       $this->stage = 0;
     }
     return true;
@@ -847,6 +870,14 @@ class Conio_ReadOp extends Contextable # {{{
   # }}}
   function _leave(): bool # {{{
   {
+    if (!$this->gear->events)
+    {
+      # events have been filtered,
+      # reattach and get back to sleep
+      $this->gear->attachReader($this);
+      $this->result->promiseHalt();
+      return false;
+    }
     $this->result
       ->valueSet($this->gear->events)
       ->promiseNoDelay();
@@ -855,9 +886,10 @@ class Conio_ReadOp extends Contextable # {{{
     return true;
   }
   # }}}
-  function consume(int $index): void # {{{
+  function filter(int $index): object # {{{
   {
     array_splice($this->gear->events, $index, 1);
+    return $this->result;
   }
   # }}}
   function resume(): object # {{{
@@ -872,8 +904,15 @@ class Conio_ReadOp extends Contextable # {{{
 # }}}
 class Conio_ReadChar extends Conio_ReadOp # {{{
 {
-  function _leave(): bool # {{{
+  function _leave(): bool
   {
+    # check all events filtered
+    if (!$this->gear->events)
+    {
+      $this->gear->attachReader($this);
+      $this->result->promiseHalt();
+      return false;
+    }
     # find first character in the input
     foreach ($this->gear->events as $i => $e)
     {
@@ -884,7 +923,6 @@ class Conio_ReadChar extends Conio_ReadOp # {{{
         continue;
       }
       # consume one and complete
-      array_splice($this->gear->events, $i, 1);
       $this->result
         ->valueSet($c)
         ->promiseNoDelay();
@@ -896,16 +934,6 @@ class Conio_ReadChar extends Conio_ReadOp # {{{
     $this->stage--;
     return $this->_enter();
   }
-  # }}}
-  function consume(int $index): void # {{{
-  {
-    throw ErrorEx::fatal(
-      __CLASS__, __FUNCTION__,
-      "character is consumed automatically\n".
-      "please dont use this method"
-    );
-  }
-  # }}}
 }
 # }}}
 abstract class Conio_PseudoBase # {{{
@@ -1276,7 +1304,7 @@ abstract class Conio_PseudoBase # {{{
       return;
     }
     # deactivate output buffering
-    $this->setBuffering(false);
+    $this->setBuffering();
     # invoke instance-specific finalizer
     $this->finit();
     # restore s7c1t/s8c1t
@@ -1688,15 +1716,15 @@ abstract class Conio_PseudoBase # {{{
     $this->_DECSET(self::M_TRACKING[$n], true);
   }
   # }}}
-  function setBuffering(bool $on): void # {{{
+  function setBuffering(): void # {{{
   {
-    if ($on)
+    if (($n = $this->buffering) === 0)
     {
       if (ob_start($this->setWrite(...), 1)) {
         $this->buffering = ob_get_level();
       }
     }
-    elseif ($n = $this->buffering)
+    elseif ($n > 0)
     {
       # flush and stop buffering
       if (ob_get_level() === $n) {
@@ -3016,7 +3044,7 @@ abstract class Conio_PseudoBase # {{{
     $this->mouse  = $this->probeMouse();
     $this->colors = $this->probeColors();
     $this->id     = $this->getId();
-    $this->setBuffering(true);
+    $this->setBuffering();
     # complete
     return true;
   }
