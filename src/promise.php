@@ -21,6 +21,7 @@ class Promise # {{{
   # TODO: rename glue to completables
   # TODO: then(<Promise>)?
   # TODO: refine/test column result
+  # TODO: refine result loggable
   # TODO: cancellation on abolishment/gc, refs in the loop?
   # TODO: await in await?
   # TODO: time stats?
@@ -1399,7 +1400,7 @@ class PromiseResult implements ArrayAccess,Loggable
   }
   # }}}
   function _row(# {{{
-    object $ctrl, array $group, int $done, int $total
+    object $r, array $group, int $done, int $total
   ):void
   {
     # extract data required
@@ -1416,12 +1417,11 @@ class PromiseResult implements ArrayAccess,Loggable
     # add the row track
     $this->_track()->trace[] = [
       self::IS_ROW, $tracks, $order,
-      $done, $total, $ctrl->ok,
-      $ctrl->track->duration()
+      $done, $total, $r->track->duration()
     ];
     # set values
     $this->value = $values;
-    $this->ok = $ctrl->ok;
+    $this->ok = $r->ok;
   }
   # }}}
   function _column(# {{{
@@ -1610,9 +1610,9 @@ class PromiseResult implements ArrayAccess,Loggable
           ];
         }
         $a[] = [
-          'level' => $t[5] ? 0 : 2,
+          'level' => 3,
           'msg'   => ['ROW', $t[3].'/'.$t[4]],
-          'span'  => $t[6],
+          'span'  => $t[5],
           'logs'  => $b
         ];
         break;

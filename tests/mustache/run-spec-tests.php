@@ -5,7 +5,7 @@ require_once(
   __DIR__.DIRECTORY_SEPARATOR.
   '..'.DIRECTORY_SEPARATOR.
   '..'.DIRECTORY_SEPARATOR.
-  'mustache.php'
+  'autoload.php'
 );
 if (!($json = get_testfiles()))
 {

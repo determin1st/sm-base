@@ -2,13 +2,11 @@
 namespace SM;
 use function define,defined,spl_autoload_register;
 use const DIRECTORY_SEPARATOR;
-require_once
-  __DIR__.DIRECTORY_SEPARATOR.
-  'functions.php';
 ###
-defined('SM\\AUTO') || define('SM\\AUTO', new class()
+defined('SM\\AUTO') ||
+define('SM\\AUTO', new class()
 {
-  const DIR=__DIR__.DIRECTORY_SEPARATOR;
+  const DIR=__DIR__.DIRECTORY_SEPARATOR.'src'.DIRECTORY_SEPARATOR;
   const MAP=[
     'SM\\Conio'        => 'conio.php',
     'SM\\ErrorEx'      => 'error.php',
@@ -19,11 +17,7 @@ defined('SM\\AUTO') || define('SM\\AUTO', new class()
     'SM\\Loop'         => 'promise.php',
     'SM\\SyncExchange' => 'sync.php',
   ];
-  public object $callback;
-  public bool   $ready=false;
-  function __construct() {
-    $this->callback = $this->autoload(...);
-  }
+  public bool $ready=false;
   function autoload(string $class): void
   {
     if (isset(self::MAP[$class])) {
@@ -35,9 +29,11 @@ defined('SM\\AUTO') || define('SM\\AUTO', new class()
     if ($this->ready) {
       return true;
     }
-    return $this->ready = spl_autoload_register(
-      $this->callback
-    );
+    if (!spl_autoload_register($this->autoload(...))) {
+      return false;
+    }
+    require(self::DIR.'functions.php');
+    return $this->ready = true;
   }
 });
 return (AUTO)->register();

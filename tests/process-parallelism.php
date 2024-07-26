@@ -56,12 +56,13 @@ function master_loop(): void # {{{
       ###
       switch ($k) {
       case 'i':
-        $processCount = Process::count();
         echo <<<TEXT
 $say
-      Process has $processCount children
+      Process master
     ╔═══╗
     ║ 1 ║ start new process
+    ║ 2 ║ list process identifiers
+    ║ 3 ║ stop one (first)
     ║ 0 ║ stop all
     ╠═══╣
     ║ i ║ information
@@ -81,10 +82,29 @@ TEXT;
         echo $say;
         $p1 || $p1 = Process
         ::start(__FILE__)
-        ->then(function(object $r):void {
+        ->then(function(object $r): void {
           $r->ok && $r->info('pid', $r->value);
-          $r->confirm('Process::start');
+          $r->confirm('Process::start', __FILE__);
         });
+        break;
+        ###
+      case '2':
+        ###
+        echo "> list: ".implode(',', Process::list())."\n";
+        break;
+        ###
+      case '3':
+        ###
+        echo $say;
+        if (!$p1 && ($a = Process::list()))
+        {
+          $id = $a[0];
+          $p1 = Process
+          ::stop($id)
+          ->then(function(object $r) use ($id): void {
+            $r->confirm('Process::stop', $id);
+          });
+        }
         break;
         ###
       case '0':
@@ -103,11 +123,11 @@ TEXT;
 }
 # }}}
 function master_handler(# {{{
-  string $event, ?object $o=null
+  string $eventName, ?object $o=null
 ):void
 {
-  echo "> event: ".$event."\n";
-  if ($o) {
+  echo "> event: ".$eventName."\n";
+  if ($o && ($o instanceof Loggable)) {
     echo ErrorLog::render($o);
   }
 }

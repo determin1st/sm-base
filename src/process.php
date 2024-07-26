@@ -13,11 +13,15 @@ require_once __DIR__.DIRECTORY_SEPARATOR.'sync.php';
 # }}}
 class Process # {{{
 {
+  # TODO: notify master about the handler
+  # TODO: spawn must wait handler established
+  # TODO: turn on output buffer
+  # TODO: once in a while spawn checks its actually running
   # initializer {{{
   static ?object $BASE=null;
   private function __construct()
   {}
-  static function init(): ?object
+  static function init(?object $f=null): ?object
   {
     if (self::$BASE) {
       return null;
@@ -29,10 +33,10 @@ class Process # {{{
       ));
       switch ($i = $status->get()) {
       case 0:
-        $base = new Process_Master($status);
+        $base = new Process_Master($f, $status);
         break;
       case 1:
-        $base = new Process_Slave($status);
+        $base = new Process_Slave($f, $status);
         break;
       default:
         throw ErrorEx::fail(__CLASS__,
@@ -52,8 +56,8 @@ class Process # {{{
   static function is_master(): bool {
     return self::$BASE->isMaster;
   }
-  static function count(): int {
-    return self::$BASE->spawnCount;
+  static function set_handler(object $f): void {
+    self::$BASE->handlerSet($f);
   }
   static function start(string $file, array $cfg=[]): object {
     return self::$BASE->start($file, $cfg);
@@ -62,10 +66,18 @@ class Process # {{{
     return self::$BASE->stop($pid);
   }
   static function stop_all(): object {
-    return self::$BASE->checkStopAll();
+    return self::$BASE->stopAllCheck();
   }
-  static function set_handler(object $f): void {
-    self::$BASE->handlerSet($f);
+  static function count(): int {
+    return self::$BASE->spawnCount;
+  }
+  static function list(): array
+  {
+    $a = [];
+    foreach (self::$BASE->spawn as $o) {
+      $a[] = $o->pid;
+    }
+    return $a;
   }
   # }}}
 }
@@ -96,12 +108,13 @@ class Process_Gear extends Completable # {{{
 class Process_Master # {{{
 {
   # basis {{{
-  public bool    $isMaster=true,$active=true;
-  public ?object $handler=null;
-  public array   $spawn=[];# pid => Process_Spawn
-  public int     $spawnCount=0;
-  function __construct(object $status)
-  {
+  public bool  $isMaster=true,$active=true;
+  public array $spawn=[];# pid => Process_Spawn
+  public int   $spawnCount=0;
+  function __construct(
+    public ?object $handler,
+    object $status
+  ) {
     # master doesnt need a status
   }
   # }}}
@@ -122,15 +135,27 @@ class Process_Master # {{{
     $this->spawnCount++;
   }
   # }}}
-  function spawnDetach(object $o): void # {{{
+  function spawnDetach(object $o): bool # {{{
   {
-    unset($this->spawn[$o->pid]);
-    $this->spawnCount--;
+    if (isset($this->spawn[$pid = $o->pid]))
+    {
+      unset($this->spawn[$pid]);
+      $this->spawnCount--;
+      return true;
+    }
+    return false;
   }
   # }}}
   function handlerSet(object $f): void # {{{
   {
     $this->handler = $f;
+  }
+  # }}}
+  function start(string $file, array $cfg): object # {{{
+  {
+    return new Promise(new Process_Spawn(
+      $this, $file, $cfg
+    ));
   }
   # }}}
   function check(): bool # {{{
@@ -149,26 +174,15 @@ class Process_Master # {{{
     return true;
   }
   # }}}
-  function checkStopAll(): object # {{{
-  {
-    if ($this->spawnCount) {
-      return $this->stopAll();
-    }
-    return Promise::Func(function(object $r): void {
-      $r->warn('no processes to stop');
-      $r->confirm(__CLASS__);
-    });
-  }
-  # }}}
-  function start(string $file, array $cfg): object # {{{
-  {
-    return new Promise(new Process_Spawn(
-      $this, $file, $cfg
-    ));
-  }
-  # }}}
   function stop(string $pid): object # {{{
   {
+    if (isset($this->spawn[$pid])) {
+      return $this->spawn[$pid]->stop();
+    }
+    return Promise::Func(function(object $r): void {
+      $r->warn('does not exists or already stopped');
+      $r->confirm(__CLASS__,$pid, 'stop');
+    });
   }
   # }}}
   function stopAll(): object # {{{
@@ -180,6 +194,17 @@ class Process_Master # {{{
     return Promise
     ::Row($a)
     ->then(function(object $r): void {
+      $r->confirm(__CLASS__, 'stopAll');
+    });
+  }
+  # }}}
+  function stopAllCheck(): object # {{{
+  {
+    if ($this->spawnCount) {
+      return $this->stopAll();
+    }
+    return Promise::Func(function(object $r): void {
+      $r->warn('no processes to stop');
       $r->confirm(__CLASS__, 'stopAll');
     });
   }
@@ -207,14 +232,14 @@ class Process_Master # {{{
 # }}}
 class Process_Slave extends Process_Master # {{{
 {
-  # TODO: notify master about handler
-  # TODO: turn on output buffer
   # basis {{{
   public bool    $isMaster=false;
   public ?object $status,$server;
   public ?array  $config;
-  function __construct(object $status)
-  {
+  function __construct(
+    public ?object $handler,
+    object $status
+  ) {
     # create communication channel
     $chan = ErrorEx::peep(
       self::new_channel(Fx::$PROCESS_ID)
@@ -292,7 +317,6 @@ class Process_Slave extends Process_Master # {{{
 # }}}
 class Process_Spawn extends Reversible # {{{
 {
-  # TODO: wait until handler established
   const # {{{
     WAIT = 3*1000000000,# ns
     DESC = [
@@ -522,9 +546,7 @@ class Process_Spawn extends Reversible # {{{
   function check(): ?object # {{{
   {
     # check active
-    if ($this->status->tryGet())
-    {
-      # TODO: once in a while should check is actually running
+    if ($this->status->tryGet()) {
       return null;
     }
     # terminate
@@ -552,10 +574,12 @@ class Process_Spawn extends Reversible # {{{
     ::Func(function(object $r): void {
       # first, to avoid collisions (object use),
       # detach it from the base
-      $this->base->spawnDetach($this);
+      if (!$this->base->spawnDetach($this)) {
+        $r->fail('already detached');
+      }
       $r->promiseNoDelay();
     })
-    ->then($this->chan->client())
+    ->okay($this->chan->client())
     ->okay(function(object $r) use ($wait): ?object {
       # send termination command
       if ($r->index === 0) {
@@ -580,8 +604,8 @@ class Process_Spawn extends Reversible # {{{
       return $r->promiseIdle();
     })
     ->then(function(object $r): void {
-      # detach from the base and cleanup
-      $this->_pipeClose(false);
+      # cleanup
+      $this->pipe && $this->_pipeClose(false);
       $this->_cleanup();
       # confirm operation
       $r->confirm(

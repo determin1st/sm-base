@@ -4,7 +4,7 @@ require_once(
   __DIR__.DIRECTORY_SEPARATOR.
   '..'.DIRECTORY_SEPARATOR.
   '..'.DIRECTORY_SEPARATOR.
-  'mustache.php'
+  'autoload.php'
 );
 $m = \SM\Mustache::new(['escape'=>true]);
 $x = isset($argv[1]) ? intval($argv[1]) : 1;
