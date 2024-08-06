@@ -7,38 +7,41 @@ require_once(
 );
 ###
 Conio::init() && exit();
-###
 $EXCHG = SyncExchange::new([
-  'id'          => 'sync-exchange-test',
-  'share-read'  => true,
-  'share-write' => true,
-  #'boost'       => true,
-  'size'        => 3
+  'id'   => 'sync-exchange-test',
+  'size' => 3
 ]);
 if (ErrorEx::is($EXCHG))
 {
   echo ErrorLog::render($EXCHG);
   exit();
 }
-for ($p0=Promise::Value('i'),$p1=$p2=null;;)
+###
+for ($p0=Promise::Value('i'),$p1=null;;)
 {
-  if (!($r = await_any($p0,$p1,$p2))->ok &&
-      !$r->isCancelled)
+  $r = await_any($p0, $p1);
+  if (!$r->ok && !$r->isCancelled)
   {
     echo "\n".ErrorLog::render($r);
-    echo "> press any key to quit..\n";
-    await(Conio::readch());
     break;
   }
-  switch ($r->index) {
-  case 0:# console {{{
+  if ($r->index)
+  {
+    $p1 = null;
+    echo ErrorLog::render($r);
+  }
+  else
+  {
+    # readch {{{
     ###
-    $p0 = Conio::readch();
+    $p0  = Conio::readch();
+    $k   = $r->value;
+    $say = "> ".$k."\n";
     ###
-    switch ($k = $r->value) {
+    switch ($k) {
     case 'i':
       echo <<<TEXT
-
+$say
     SyncExchange
   ╔═══╗
   ║ 1 ║ client => notification ~ w
@@ -58,18 +61,19 @@ TEXT;
       ###
       break;
     case 'q':
-      echo "> quit\n\n";
-      exit();
+      echo $say;
+      break 2;
     case '1':
     case '2':
     case '3':
     case '4':
       ###
-      if ($p2) {
+      if ($p1) {
         break;
       }
-      $s = $k.':hello from PID='.Fx::$PROCESS_ID;
-      $p2 = $EXCHG
+      echo $say;
+      $s  = $k.':hello from PID='.Fx::$PROCESS_ID;
+      $p1 = $EXCHG
       ->client()
       ->okay(function($r) use ($k) {
         echo "> writing #".$k.": ";
@@ -82,6 +86,7 @@ TEXT;
       ###
     case '5':
       ###
+      echo $say;
       echo "> starting server..\n";
       await(Conio::drain());
       $p1 = $EXCHG
@@ -102,20 +107,18 @@ TEXT;
       ###
     case '0':
       ###
-      $p1 && $p1->cancel();
-      $p2 && $p2->cancel();
+      if ($p1)
+      {
+        echo $say;
+        $p1->cancel();
+      }
       break;
     }
-    break;
-  # }}}
-  case 1:# server
-    $p1 = null;
-    break;
-  case 2:# client
-    $p2 = null;
-    break;
+    # }}}
   }
 }
+echo "\n";
+exit();
 ###
 function new_client_handler($k, $s) # {{{
 {
@@ -204,7 +207,7 @@ function server_handler($r) # {{{
       echo "> ECHO: ";
       return $r->write($r->value);
     case 1:
-      echo "ok\n";
+      echo $r->value."\n";
       break;
     }
     break;

@@ -6,12 +6,11 @@ require_once(
   'autoload.php'
 );
 ###
-if ($e = Process::init())
+if ($e = Process::init('sm-process-test'))
 {
-  echo "\n".ErrorLog::render($e);
+  echo ErrorLog::render($e);
   exit();
 }
-###
 if (Process::is_master())
 {
   # MASTER has the console
@@ -27,7 +26,8 @@ if (Process::is_master())
 else
 {
   # SLAVE process/worker operates in silence
-  slave_loop();
+  Process::set_handler(slave_handler(...));
+  await(sleep(30000));
 }
 exit();
 ###
@@ -83,26 +83,41 @@ TEXT;
         $p1 || $p1 = Process
         ::start(__FILE__)
         ->then(function(object $r): void {
-          $r->ok && $r->info('pid', $r->value);
-          $r->confirm('Process::start', __FILE__);
+          if ($r->ok) {
+            $r->info('pid', $r->value);
+          }
+          else
+          {
+            $r->warn('tolerate error');
+            $r->ok = true;
+          }
+          $r->title('Process::start', __FILE__);
         });
         break;
         ###
       case '2':
         ###
-        echo "> list: ".implode(',', Process::list())."\n";
+        $a = Process::list();
+        echo "> list[".count($a)."]";
+        if ($a) {
+          echo ": ".implode(', ', $a);
+        }
+        echo "\n";
         break;
         ###
       case '3':
         ###
         echo $say;
-        if (!$p1 && ($a = Process::list()))
+        if (!$p1)
         {
-          $id = $a[0];
+          $id = ($a = Process::list())
+            ? $a[0]
+            : '12345';
+          ###
           $p1 = Process
           ::stop($id)
           ->then(function(object $r) use ($id): void {
-            $r->confirm('Process::stop', $id);
+            $r->title('Process::stop', $id);
           });
         }
         break;
@@ -113,7 +128,7 @@ TEXT;
         $p1 || $p1 = Process
         ::stop_all()
         ->then(function(object $r):void {
-          $r->confirm('Process::stop_all');
+          $r->title('Process::stop_all');
         });
         break;
       }
@@ -122,19 +137,34 @@ TEXT;
   echo "\n";
 }
 # }}}
-function master_handler(# {{{
-  string $eventName, ?object $o=null
-):void
+function master_handler(array $event): void # {{{
 {
-  echo "> event: ".$eventName."\n";
-  if ($o && ($o instanceof Loggable)) {
-    echo ErrorLog::render($o);
+  foreach ($event as $e)
+  {
+    echo "> event: ".$e[0].
+      " pid=".($e[1] ?: "self")."\n";
+    ###
+    switch ($e[0]) {
+    case 'stop':
+    case 'error':
+      echo ErrorLog::render($e[2]);
+      break;
+    }
   }
 }
 # }}}
-function slave_loop(): void # {{{
+function slave_handler(array $event): void # {{{
 {
-  await(sleep(30000));
+  foreach ($event as $e)
+  {
+    echo "> command: ".$e[0]."\n";
+    ###
+    switch ($e[0]) {
+    case 'error':
+      echo ErrorLog::render($e[2]);
+      break;
+    }
+  }
 }
 # }}}
 ###

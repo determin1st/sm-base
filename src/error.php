@@ -64,34 +64,9 @@ class ErrorEx extends Error # {{{
     parent::__construct('', -1);
     self::stringify($msg);
   }
-  static function unexpected(int $n, string $s): bool
-  {
-    $name = isset(self::ERROR_NUM[$n])
-      ? self::ERROR_NUM[$n]
-      : '#'.$n.' UNKNOWN';
-    ###
-    throw new self(3, [$name, $s]);
-  }
-  static function skip(): self {
-    return new self(0);
-  }
-  static function info(...$msg): self {
-    return new self(0, $msg);
-  }
-  static function warn(...$msg): self {
-    return new self(1, $msg);
-  }
-  static function fail(...$msg): self {
-    return new self(2, $msg);
-  }
-  static function fatal(...$msg): self {
-    return new self(3, $msg);
-  }
-  static function trace(int $up=0): self {
-    return new self(4, [], $up);
-  }
   # }}}
   # stasis {{{
+  ### constructors
   static function from(# {{{
     ?object $e, bool $null=false
   ):?self
@@ -105,10 +80,8 @@ class ErrorEx extends Error # {{{
         ? ($e->errorlevel() ? $e : null)
         : $e;
     }
-    if ($e instanceof Throwable)
-    {
-      $msg = [];
-      return new self(3, $msg, $e);
+    if ($e instanceof Throwable) {
+      return new self(3, [], $e);
     }
     if ($null) {
       return null;
@@ -117,15 +90,56 @@ class ErrorEx extends Error # {{{
     return new self(0, $msg, $e);
   }
   # }}}
-  static function value(object $e): self # {{{
+  static function unexpected(int $n, string $s): bool # {{{
   {
-    return ($e instanceof Throwable)
-      ? new self(3, [], $e)
-      : (($e instanceof Loggable)
-        ? new self($e->logLevel(), [], $e)
-        : new self(0, [], $e));
+    $name = isset(self::ERROR_NUM[$n])
+      ? self::ERROR_NUM[$n]
+      : '#'.$n.' UNKNOWN';
+    ###
+    throw new self(3, [$name, $s], 0);
   }
   # }}}
+  static function skip(): self # {{{
+  {
+    return new self(0);
+  }
+  # }}}
+  static function info(...$msg): self # {{{
+  {
+    return new self(0, $msg);
+  }
+  # }}}
+  static function warn(...$msg): self # {{{
+  {
+    return new self(1, $msg);
+  }
+  # }}}
+  static function fail(...$msg): self # {{{
+  {
+    return new self(2, $msg);
+  }
+  # }}}
+  static function fatal(...$msg): self # {{{
+  {
+    return new self(3, $msg, 0);
+  }
+  # }}}
+  static function fatal_up(int $up, ...$msg): self # {{{
+  {
+    return new self(3, $msg, $up);
+  }
+  # }}}
+  static function trace(int $up=0): self # {{{
+  {
+    return new self(4, [], $up);
+  }
+  # }}}
+  static function loggable(object $e): self # {{{
+  {
+    return new self(4, [], $e);
+  }
+  # }}}
+  ### util
   static function chain(?object ...$ee): self # {{{
   {
     for ($e=null, $i=0, $j=count($ee); $i < $j; ++$i)
@@ -163,12 +177,12 @@ class ErrorEx extends Error # {{{
     return $e;
   }
   # }}}
-  static function is(&$o): bool # {{{
+  static function is($o): bool # {{{
   {
     return $o instanceof self;
   }
   # }}}
-  static function &stringify(array &$a): array # {{{
+  static function stringify(array $a): array # {{{
   {
     # convert items
     for ($i=0,$j=count($a); $i < $j; ++$i)
@@ -213,7 +227,7 @@ class ErrorEx extends Error # {{{
   }
   # }}}
   # }}}
-  # inner api {{{
+  # dynamis {{{
   function __debugInfo(): array # {{{
   {
     $a = [
@@ -295,7 +309,7 @@ class ErrorEx extends Error # {{{
   ###
   function &var(mixed &$v): mixed {return $v;}
   function  val(mixed  $v): mixed {return $v;}
-  # }}}
+  ###
   # is/has {{{
   function isInfo(): bool {
     return $this->level === 0;
@@ -328,6 +342,7 @@ class ErrorEx extends Error # {{{
       ($this->value instanceof Throwable)
     );
   }
+  # }}}
   # }}}
   # loggable {{{
   function log(): array # {{{
@@ -368,12 +383,21 @@ class ErrorEx extends Error # {{{
         'msg'   => $this->msg
       ];
     case 3:# fatal
-      # check exception provided,
-      # this happens when created from thrown
-      if ($e = $this->value)
+      if (is_int($this->value))
       {
-        $m = [$e->getMessage()];
+        $m = $this->msg;
         $t = self::get_trace($this);
+        for ($i=$this->value; $i; --$i) {
+          array_shift($t);
+        }
+      }
+      else
+      {
+        # when created from throwable,
+        # exception provided as value
+        $e = $this->value;
+        $m = [$e->getMessage()];
+        $t = self::get_trace($e);
         $a = $e->getFile();
         if ($b = strrpos($a, DIRECTORY_SEPARATOR))
         {
@@ -390,24 +414,25 @@ class ErrorEx extends Error # {{{
           'line' => $e->getLine()
         ]);
       }
-      else
-      {
-        $m = $this->msg;
-        $t = self::get_trace($this);
-      }
       return [
         'level' => 2,
         'msg'   => $m,
         'trace' => $t
       ];
     case 4:
-      $i = $this->value;
+      # loggable?
+      if (!is_int($this->value))
+      {
+        return $this->value->log();
+      }
+      # tracing
       $t = self::get_trace($this);
+      $i = $this->value;
       while ($i--) {
         array_shift($t);
       }
       return [
-        'level' => 0,
+        'level' => 3,
         'msg'   => ['TRACING'],
         'trace' => $t
       ];

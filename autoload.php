@@ -8,14 +8,15 @@ define('SM\\AUTO', new class()
 {
   const DIR=__DIR__.DIRECTORY_SEPARATOR.'src'.DIRECTORY_SEPARATOR;
   const MAP=[
-    'SM\\Conio'        => 'conio.php',
-    'SM\\ErrorEx'      => 'error.php',
-    'SM\\ErrorLog'     => 'error.php',
-    'SM\\Hurl'         => 'hurl.php',
-    'SM\\Process'      => 'process.php',
-    'SM\\Promise'      => 'promise.php',
-    'SM\\Loop'         => 'promise.php',
-    'SM\\SyncExchange' => 'sync.php',
+    'SM\\Conio'         => 'conio.php',
+    'SM\\ErrorEx'       => 'error.php',
+    'SM\\ErrorLog'      => 'error.php',
+    'SM\\Hurl'          => 'hurl.php',
+    'SM\\Process'       => 'process.php',
+    'SM\\Promise'       => 'promise.php',
+    'SM\\Loop'          => 'promise.php',
+    'SM\\SyncExchange'  => 'sync.php',
+    'SM\\SyncAggregate' => 'sync.php',
   ];
   public bool $ready=false;
   function autoload(string $class): void

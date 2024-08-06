@@ -854,12 +854,7 @@ abstract class Conio_Base extends Conio_PseudoBase
       ? $this->parse8($s, $n, $j)
       : $this->parse7($s, $n, $j);
     # update indexes
-    if (!$this->setPending())
-    {
-      throw ErrorEx::fatal(
-        'incorrect parse behaviour'
-      );
-    }
+    $this->setPending();
     # check the result
     if ($i < 0)
     {
