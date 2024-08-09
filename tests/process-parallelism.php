@@ -14,12 +14,14 @@ if ($e = Process::init('sm-process-test'))
 if (Process::is_master())
 {
   # MASTER has the console
+  echo "> Conio::init()..\n";
   if ($e = Conio::init())
   {
     echo ErrorLog::render($e);
     exit();
   }
   Conio::set('buffering', false);
+  echo "> Conio::init();\n";
   Process::set_handler(master_handler(...));
   master_loop();
 }
@@ -27,6 +29,8 @@ else
 {
   # SLAVE process/worker operates in silence
   Process::set_handler(slave_handler(...));
+  await(sleep(2000));
+  Process::$BASE->output('hello');
   await(sleep(30000));
 }
 exit();
@@ -145,6 +149,11 @@ function master_handler(array $event): void # {{{
       " pid=".($e[1] ?: "self")."\n";
     ###
     switch ($e[0]) {
+    case 'output':
+      echo $e[2];
+      break;
+    case 'attach':
+      $e[2]->title('Process', 'attachment');
     case 'stop':
     case 'error':
       echo ErrorLog::render($e[2]);

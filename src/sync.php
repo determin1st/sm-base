@@ -299,7 +299,7 @@ abstract class Sync_ReaderWriterOp extends Contextable # {{{
   const
     IDLE_THRESHOLD = 5000,
     IDLE_TIME = 1*1000000,# ms ~ ns
-    WAIT_DATA = 100*1000000;# ms ~ ns
+    WAIT_DATA = 300*1000000;# ms ~ ns
   public string
     $value='';
   public int
@@ -386,7 +386,7 @@ abstract class Sync_ReaderWriterOp extends Contextable # {{{
       return false;
     }
     $this->result->fail(
-      'timed out ('.(int)($t / 1000000).'ms)'
+      'timeout ('.(int)($t / 1000000).'ms)'
     );
     return $this->_done();
   }
@@ -434,7 +434,7 @@ abstract class Sync_ReaderWriterOp extends Contextable # {{{
     }
     # everything is written and read
     $this->stage++;
-    return $this->_yielding(true)->_complete();
+    return $this->_yielding(false)->_complete();
   }
   # }}}
   function _dataGet(): bool # {{{

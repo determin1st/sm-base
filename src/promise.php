@@ -2,7 +2,7 @@
 # defs {{{
 namespace SM;
 use
-  FFI,Closure,Error,Throwable,
+  Closure,Error,Throwable,
   SplDoublyLinkedList,ArrayAccess;
 use function
   is_array,count,array_unshift,array_pop,
@@ -15,12 +15,10 @@ use const
   DIRECTORY_SEPARATOR,PHP_INT_MAX,PHP_OS_FAMILY;
 ###
 require_once __DIR__.DIRECTORY_SEPARATOR.'error.php';
+require_once __DIR__.DIRECTORY_SEPARATOR.'sysapi.php';
 # }}}
 class Promise # {{{
 {
-  # TODO: rename glue to completables
-  # TODO: confirm() only confirms non-empty
-  # TODO: title() for hardcoded title?
   # TODO: cancel():void ?
   # TODO: refine/test column result
   # TODO: refine result loggable
@@ -30,7 +28,7 @@ class Promise # {{{
   public ?array  $_reverse=null;
   public ?object $_context=null,$result=null;
   public int     $_time=PHP_INT_MIN,$pending=-1;
-  public ?object $_queue;
+  public object  $_queue;
   ###
   function __construct(object $o)
   {
@@ -51,15 +49,9 @@ class Promise # {{{
     return new self(new Completable_Error($e));
   }
   # }}}
-  static function Value(...$v): self # {{{
+  static function Value($v): self # {{{
   {
-    $a = match (count($v))
-    {
-      0 => new PromiseValue(null),
-      1 => new PromiseValue($v[0]),
-      default => new PromiseValue($v)
-    };
-    return new self($a);
+    return new self(new Completable_Value($v));
   }
   # }}}
   static function Func(object $f, ...$a): self # {{{
@@ -218,8 +210,7 @@ class Promise # {{{
   }
   # }}}
   # }}}
-  # utilitary {{{
-  ### in vitro
+  # util {{{
   function _reverseAdd(object $reversible): void # {{{
   {
     if ($this->_reverse) {
@@ -254,17 +245,6 @@ class Promise # {{{
   function _queueAppendOne(object $comp): self # {{{
   {
     $this->_queueGet()->push($comp);
-    return $this;
-  }
-  # }}}
-  ### in vivo
-  function _init(): self # {{{
-  {
-    $this->result  = new PromiseResult($this);
-    $this->pending = $this->_queue->count();
-    if ($this->_time < 0) {
-      $this->_time = 1;
-    }
     return $this;
   }
   # }}}
@@ -315,6 +295,16 @@ class Promise # {{{
     $this->pending = 1;
   }
   # }}}
+  # }}}
+  function _init(): self # {{{
+  {
+    $this->result  = new PromiseResult($this);
+    $this->pending = $this->_queue->count();
+    if ($this->_time < 0) {
+      $this->_time = 1;
+    }
+    return $this;
+  }
   # }}}
   function _execute(): bool # {{{
   {
@@ -377,8 +367,6 @@ class Promise # {{{
     }
     # remove from the loop
     Loop::detach($this);
-    # complete
-    $this->_queue = null;
     return $this->result;
   }
   # }}}
@@ -426,7 +414,7 @@ class Loop # {{{
   ###
   # }}}
   # basis {{{
-  public object  $row,$sys;
+  public object  $row;
   public array   $col=[];
   public int     $rowIdx=-1,$rowCnt=0,$colNdx=0;
   public int     $added=0,$spinLevel=0,$spinYield=0;
@@ -437,49 +425,23 @@ class Loop # {{{
     if (self::$LOOP) {
       return;
     }
+    # wire up
     self::$LOOP = new self();
     PromiseResult::$HRTIME = &self::$HRTIME;
     Completable::$HRTIME = &self::$HRTIME;
   }
   private function __construct()
   {
-    # check the requirement
-    if (!class_exists('FFI'))
-    {
-      throw ErrorEx::fail(__CLASS__,
-        'FFI extension is required'
-      );
-    }
     # initialize
     self::$TIME   = time();
     self::$HRTIME = hrtime(true);
     $this->row    = new SplDoublyLinkedList();
-    if (PHP_OS_FAMILY === 'Windows')
+    if (PHP_OS_FAMILY !== 'Windows')
     {
-      # windows usleep/nanosleep implementation
-      # in PHP relies on a waitable timer event
-      # that prevents process entering
-      # the generic alertable state and
-      # only wastes time on that timer;
-      $this->sys = FFI::cdef(
-        'uint32_t SleepEx(uint32_t,uint32_t);',
-        'kernel32.dll'
-      );
-    }
-    else
-    {
-      $this->sys = FFI::cdef(
-        #'struct timespec '.
-        #"{uint64_t tv_sec,tv_nsec;}\n".
-        #"int nanosleep".
-        #"(struct timespec*, struct timespec*);",
-        'int sched_yield();',
-        'libc.so.6'
-      );
-      # the OS can axe the runtime without
+      # NIXOS can axe the runtime without
       # it running shutdown handlers on certain
       # signals been set to default;
-      # replace default handlers to avoid that
+      # lets replace default handlers
       if (function_exists('pcntl_signal'))
       {
         $def = \SIG_DFL;
@@ -500,10 +462,168 @@ class Loop # {{{
       }
     }
     # enable graceful termination
-    register_shutdown_function(
-      $this->stop(...)
+    register_shutdown_function($this->stop(...));
+  }
+  # }}}
+  # stasis {{{
+  static function gear(object $o): object # {{{
+  {
+    # a gear is a completable that
+    # is initialized with its carrier promise -
+    # it enables cancellation without a single run;
+    # gears are placed in the loop's row
+    # prior to other/dependant promises;
+    # they suppose to execute indefinitely and
+    # are removed upon cancellation which
+    # usually happens on shutdown.
+    ###
+    self::$LOOP->rowAttach($p = new Promise($o));
+    $o->result = $p->result;
+    return $o;
+  }
+  # }}}
+  static function queue(array $group=[]): object # {{{
+  {
+    $q = new Completable_Queue($group);
+    $p = new Promise($q);
+    $group || $p->halt();
+    self::$LOOP->rowAttach($p);
+    $q->result = $p->result;
+    return $q;
+  }
+  # }}}
+  static function cooldown(int $ms=0): void # {{{
+  {
+    self::$LOOP->sleep(
+      $ms ? (int)($ms * 1000000) : 0
     );
   }
+  # }}}
+  static function yield_more(): void # {{{
+  {
+    self::$LOOP->spinYield++;
+  }
+  # }}}
+  static function yield_less(): void # {{{
+  {
+    self::$LOOP->spinYield--;
+  }
+  # }}}
+  static function attach(object $p): void # {{{
+  {
+    self::$LOOP->rowAttach($p);
+  }
+  # }}}
+  static function attach_all(array $a): void # {{{
+  {
+    self::$LOOP->rowFrom($a);
+  }
+  # }}}
+  static function detach(object $p): void # {{{
+  {
+    self::$LOOP->rowDetach($p);
+  }
+  # }}}
+  static function await(object $p): object # {{{
+  {
+    $loop = self::$LOOP->enter();
+    if ($p->pending === -1) {
+      $loop->rowAttach($p);
+    }
+    do {
+      $loop->spin();
+    }
+    while ($p->pending);
+    $loop->leave();
+    return $p->result;
+  }
+  # }}}
+  static function await_all(array $a): array # {{{
+  {
+    # prepare
+    $loop = self::$LOOP->enter();
+    for ($i=0,$j=count($a) - 1; $i <= $j; ++$i)
+    {
+      if ($a[$i]->pending < 0) {
+        $loop->rowAttach($a[$i]);
+      }
+    }
+  a1:# execute
+    $loop->spin();
+  a2:# checkout
+    if ($a[$j]->pending) {
+      goto a1;
+    }
+    $a[$j] = $a[$j]->result;
+    if ($j > 0)
+    {
+      $j--;
+      goto a2;
+    }
+  a3:# complete
+    $loop->leave();
+    return $a;
+  }
+  # }}}
+  static function await_any(array $a, bool $cancel): ?object # {{{
+  {
+    # prepare
+    $loop = self::$LOOP->enter();
+    for ($i=0,$j=0,$k=count($a) - 1; $i <= $k; ++$i)
+    {
+      # for practical reasons,
+      # some slots allowed to be void,
+      # have to check it's a promise
+      if ($p = $a[$i])
+      {
+        # the promise state may vary,
+        # this is different from previous awaits,
+        # check it and decide
+        if ($p->pending === -1) {
+          $loop->rowAttach($p);
+        }
+        elseif ($p->pending === 0) {
+          goto a2;# instant completion
+        }
+        $j++;
+      }
+    }
+    # check there is nothing
+    if ($j === 0)
+    {
+      $loop->leave();
+      return null;
+    }
+  a1:
+    # execute
+    $loop->spin();
+    # find first completed
+    for ($i=0; $i <= $k; ++$i)
+    {
+      if ($a[$i] && $a[$i]->pending === 0) {
+        goto a2;
+      }
+    }
+    goto a1;
+  a2:
+    # cancel the rest when necessary
+    if ($cancel)
+    {
+      do
+      {
+        if ($k !== $i && $a[$k]) {
+          $a[$k]->cancel();
+        }
+      }
+      while ($k--);
+    }
+    # complete
+    $r = $a[$i]->result;
+    $r->index = $i;
+    $loop->leave();
+    return $r;
+  }
+  # }}}
   # }}}
   # dynamis {{{
   function rowAttach(object $p): void # {{{
@@ -702,7 +822,12 @@ class Loop # {{{
   {
     if (PHP_OS_FAMILY === 'Windows')
     {
-      $this->sys->SleepEx(
+      # PHPs usleep/nanosleep implementation
+      # relies on a waitable timer event
+      # that prevents process entering
+      # the generic alertable state and
+      # only wastes time on that timer;
+      Sys::$API->SleepEx(
         (int)($ns / 1000000),# nano => milli
         1 # alertable
       );
@@ -716,7 +841,7 @@ class Loop # {{{
         time_nanosleep(0, $ns);
       }
       else {
-        $this->sys->sched_yield();
+        Sys::$API->sched_yield();
       }
     }
   }
@@ -732,10 +857,11 @@ class Loop # {{{
     if (!($n = $this->rowCnt)) {
       return;
     }
+    # to zap the queue of the loop,
     # reset current index
     $this->rowIdx = -1;
-    # to cancel all at once,
-    # promises should be collected in array
+    # to make cancellation reliable,
+    # collect all current promises into array
     $a = [];
     $q = $this->row;
     for ($i=0; $i < $n; ++$i) {
@@ -749,163 +875,9 @@ class Loop # {{{
       return;
     }
     # cancellation caused offloading,
-    # spin the loop in degrading manner
-    # til its empty or while reduces in size
-    while (($i = $this->spin()) && $i < $n) {
-      $n = $i;
-    }
-  }
-  # }}}
-  # }}}
-  # stasis {{{
-  # inner circle
-  static function gear(object $o): object # {{{
-  {
-    # a gear is a completable that
-    # is initialized with its carrier promise -
-    # it enables cancellation without a single run;
-    # gears are placed in the loop's row
-    # prior to other/dependant promises;
-    # they suppose to execute indefinitely and
-    # are removed upon cancellation which
-    # usually happens on shutdown.
-    ###
-    self::$LOOP->rowAttach($p = new Promise($o));
-    $o->result = $p->result;
-    return $o;
-  }
-  # }}}
-  static function cooldown(int $ms=0): void # {{{
-  {
-    self::$LOOP->sleep(
-      $ms ? (int)($ms * 1000000) : 0
-    );
-  }
-  # }}}
-  static function yield_more(): void # {{{
-  {
-    self::$LOOP->spinYield++;
-  }
-  # }}}
-  static function yield_less(): void # {{{
-  {
-    self::$LOOP->spinYield--;
-  }
-  # }}}
-  static function attach(object $p): void # {{{
-  {
-    self::$LOOP->rowAttach($p);
-  }
-  # }}}
-  static function attach_all(array $a): void # {{{
-  {
-    self::$LOOP->rowFrom($a);
-  }
-  # }}}
-  static function detach(object $p): void # {{{
-  {
-    self::$LOOP->rowDetach($p);
-  }
-  # }}}
-  # outer
-  static function await(object $p): object # {{{
-  {
-    $loop = self::$LOOP->enter();
-    if ($p->pending === -1) {
-      $loop->rowAttach($p);
-    }
-    do {
-      $loop->spin();
-    }
-    while ($p->pending);
-    $loop->leave();
-    return $p->result;
-  }
-  # }}}
-  static function await_all(array $a): array # {{{
-  {
-    # prepare
-    $loop = self::$LOOP->enter();
-    for ($i=0,$j=count($a) - 1; $i <= $j; ++$i)
-    {
-      if ($a[$i]->pending < 0) {
-        $loop->rowAttach($a[$i]);
-      }
-    }
-  a1:# execute
-    $loop->spin();
-  a2:# checkout
-    if ($a[$j]->pending) {
-      goto a1;
-    }
-    $a[$j] = $a[$j]->result;
-    if ($j > 0)
-    {
-      $j--;
-      goto a2;
-    }
-  a3:# complete
-    $loop->leave();
-    return $a;
-  }
-  # }}}
-  static function await_any(array $a, bool $cancel): ?object # {{{
-  {
-    # prepare
-    $loop = self::$LOOP->enter();
-    for ($i=0,$j=0,$k=count($a) - 1; $i <= $k; ++$i)
-    {
-      # for practical reasons,
-      # some slots allowed to be void,
-      # have to check it's a promise
-      if ($p = $a[$i])
-      {
-        # the promise state may vary,
-        # this is different from previous awaits,
-        # check it and decide
-        if ($p->pending === -1) {
-          $loop->rowAttach($p);
-        }
-        elseif ($p->pending === 0) {
-          goto a2;# instant completion
-        }
-        $j++;
-      }
-    }
-    # check there is nothing
-    if ($j === 0)
-    {
-      $loop->leave();
-      return null;
-    }
-  a1:
-    # execute
-    $loop->spin();
-    # find first completed
-    for ($i=0; $i <= $k; ++$i)
-    {
-      if ($a[$i] && $a[$i]->pending === 0) {
-        goto a2;
-      }
-    }
-    goto a1;
-  a2:
-    # cancel the rest when necessary
-    if ($cancel)
-    {
-      do
-      {
-        if ($k !== $i && $a[$k]) {
-          $a[$k]->cancel();
-        }
-      }
-      while ($k--);
-    }
-    # complete
-    $r = $a[$i]->result;
-    $r->index = $i;
-    $loop->leave();
-    return $r;
+    # spin the loop until its empty
+    while ($this->spin())
+    {}
   }
   # }}}
   # }}}
@@ -927,7 +899,7 @@ abstract class Completable # {{{
           ? new Completable_Op($x)
           : (($x instanceof Error)
             ? new Completable_Error($x)
-            : new PromiseValue($x))))
+            : new Completable_Value($x))))
       : new Completable_Nop();
   }
   function __debugInfo(): array {
@@ -1092,10 +1064,10 @@ class Completable_Error extends Completable # {{{
   }
 }
 # }}}
-class PromiseValue extends Completable # {{{
+class Completable_Value extends Completable # {{{
 {
   function __construct(
-    public mixed $value
+    public $value
   ) {}
   function _complete(): bool
   {
@@ -1183,7 +1155,7 @@ class Completable_Row extends Completable # {{{
     Loop::attach_all($this->group);
     Loop::attach(new Promise($this->help));
     # suspend til completion
-    $this->result->promiseHalt();
+    $this->result->indexSet(-1)->promiseHalt();
     return false;
   }
   # }}}
@@ -1240,17 +1212,18 @@ class Completable_RowHelp extends Completable # {{{
       }
       # set ready and check successful
       $this->ready[$i] = true;
+      $p->result->index = $base->index;
       if ($p->result->ok)
       {
-        $p->result->index = $base->index++;
+        $base->index++;
         goto x1;
       }
       # failed, check break condition
-      $p->result->index = -1;
       if ($base->break && --$base->break === 0)
       {
-        $base->result->promiseWakeup();
-        $this->_cancel();
+        $base->result->indexSet($i)->promiseWakeup();
+        $this->result->ok = false;
+        $this->stop('break');
         return true;
       }
       if ($base->firstAny)
@@ -1258,8 +1231,8 @@ class Completable_RowHelp extends Completable # {{{
       x1:# check race condition
         if ($base->first && --$base->first === 0)
         {
-          $base->result->promiseWakeup();
-          $this->_cancel();
+          $base->result->indexSet($i)->promiseWakeup();
+          $this->stop('race');
           return true;
         }
       }
@@ -1279,16 +1252,16 @@ class Completable_RowHelp extends Completable # {{{
   # }}}
   function _cancel(): void # {{{
   {
-    # check
-    if (!$this->base) {
-      return;
-    }
-    # cancel all unfinished
+    $this->base && $this->stop();
+  }
+  # }}}
+  function stop(string $reason=''): void # {{{
+  {
     foreach ($this->base->group as $i => $p)
     {
       if ($p->pending > 0)
       {
-        $p->cancel();
+        $p->cancel($reason);
         $p->result->index = -1;
       }
     }
@@ -1301,39 +1274,30 @@ class Completable_RowHelp extends Completable # {{{
 class Completable_Column extends Completable # {{{
 {
   # basis {{{
-  public int  $count,$index=0;
+  public int $count,$index=0;
   function __construct(
     public ?array $group,
-    public int    $break,
-    public bool   $untied = false
+    public int    $break
   ) {
     $this->count = $n = count($group);
     if ($break >= $n || $break < 0) {
       $this->break = 0;# wont break
     }
+    $group[0]->_init();
   }
   # }}}
   function _complete(): bool # {{{
   {
     # get current promise
     $p = $this->group[$this->index];
-    # check active
-    if ($p->pending > 0) {
-      goto x1;
-    }
-    # check untouched
-    if ($p->pending < 0)
+  x1:# execute and check valid
+    if ($p->_execute())
     {
-      $p->_init();
-      goto x1;
+      # copy timestamp and resume later
+      $this->result->promiseWakeup($p->_time);
+      return false;
     }
-    # promise cancelled
-    goto x2;
-  x1:# do the work and check still active
-    if ($p->_execute()) {
-      goto x3;
-    }
-  x2:# one has finished
+    # one finished,
     # check break condition
     if ($this->break && !$p->result->ok &&
         --$this->break === 0)
@@ -1351,17 +1315,8 @@ class Completable_Column extends Completable # {{{
       $p->result->value = $r->value;
       goto x1;
     }
-    # finilize
-    $this->result->promiseNoDelay();
-    $this->untied || $this->result->_column(
-      true, $this->group, $this->index, $this->count
-    );
-    $this->group = null;
-    return true;
-  x3:# still active
-    # copy timestamp and resume later
-    $this->result->promiseWakeup($p->_time);
-    return false;
+    # complete
+    return $this->_finish();
   }
   # }}}
   function _cancel(): void # {{{
@@ -1373,33 +1328,124 @@ class Completable_Column extends Completable # {{{
       $p->cancel();
       $this->index++;
     }
-    # finilize
-    $this->result->promiseNoDelay();
-    $this->untied || $this->result->_column(
-      false, $this->group, $this->index, $this->count
+    $this->_finish(false);
+  }
+  # }}}
+  function _finish(bool $ok): bool # {{{
+  {
+    $this->result->promiseNoDelay()->_column(
+      $ok, $this->group, $this->index, $this->count
     );
-    # cleanup
     $this->group = null;
+    return true;
   }
   # }}}
-  function push(object $p): self # {{{
-  {
-    $this->group[] = $p;
-    $this->count++;
-    return $this;
+}
+# }}}
+class Completable_Queue extends Completable # {{{
+{
+  # basis {{{
+  const DISCARD_THOLD=100;
+  public int $count,$index=0;
+  function __construct(
+    public ?array $group,
+  ) {
+    if ($this->count = count($group)) {
+      $group[0]->_init();
+    }
   }
   # }}}
-  function pushAll(array $a): self # {{{
+  function _complete(): bool # {{{
   {
-    if (($n = count($a)) > 1)
+    # get current promise
+    $p = $this->group[$this->index];
+  x1:# execute and check valid
+    if ($p->_execute())
     {
-      $this->group  = array_merge($this->group, $a);
-      $this->count += $n;
+      $this->result->promiseWakeup($p->_time);
+      return false;
     }
-    elseif ($n) {
+    # check more to go
+    if (++$this->index < $this->count)
+    {
+      $p = $this->group[$this->index]->_init();
+      goto x1;
+    }
+    # all complete, reset and suspend
+    $this->group = [];
+    $this->index = $this->count = 0;
+    $this->result->promiseHalt();
+    return false;
+  }
+  # }}}
+  function _cancel(): void # {{{
+  {
+    if ($this->count > 0) {
+      $this->group[$this->index]->cancel();
+    }
+    $this->group = null;
+    $this->count = -1;
+  }
+  # }}}
+  function push(object $p): void # {{{
+  {
+    if (($n = $this->count) < 0) {
+      return;
+    }
+    if ($n === 0)
+    {
+      $p->_init();
+      $this->result->promiseWakeup();
+    }
+    elseif ($this->index > self::DISCARD_THOLD)
+    {
+      $this->group = array_slice(
+        $this->group, $this->index
+      );
+      $n -= $this->index;
+      $this->index = 0;
+    }
+    $this->group[$n] = $p;
+    $this->count = $n + 1;
+  }
+  # }}}
+  function pushAll(array $a): void # {{{
+  {
+    
+    if (($n = $this->count) < 0 ||
+        ($m = count($a)) === 0)
+    {
+      return;
+    }
+    if ($m === 1)
+    {
       $this->push($a[0]);
+      return;
     }
-    return $this;
+    if ($n === 0)
+    {
+      $this->group = $a;
+      $this->count = $m;
+      $a[0]->_init();
+      $this->result->promiseWakeup();
+      return;
+    }
+    if ($this->index > self::DISCARD_THOLD)
+    {
+      $this->group = array_slice(
+        $this->group, $this->index
+      );
+      $n -= $this->index;
+      $this->index  = 0;
+    }
+    $this->group = array_merge($this->group, $a);
+    $this->count = $n + $m;
+  }
+  # }}}
+  function cancel(): void # {{{
+  {
+    ~$this->count &&
+    $this->result->promiseCancel();
   }
   # }}}
 }
@@ -1419,12 +1465,12 @@ class PromiseResult implements ArrayAccess,Loggable
     IS_FUSION  = 6,# all => fuse track
     IS_CANCELLATION = 9;# all => cancellation track
   ###
-  static int     $HRTIME;# Loop::$HRTIME
-  public int     $started,$index;
-  public object  $track;
-  public bool    $ok,$isCancelled=false;
-  public array   $store;
-  public mixed   $value;
+  static int    $HRTIME;# Loop::$HRTIME
+  public int    $started,$index;
+  public object $track;
+  public bool   $ok,$isCancelled=false;
+  public array  $store;
+  public mixed  $value;
   ###
   function __construct(
     public ?object $promise
@@ -1440,9 +1486,7 @@ class PromiseResult implements ArrayAccess,Loggable
     $this->store = [null];
     $this->value = &$this->store[0];
   }
-  # }}}
-  # internals {{{
-  function __debugInfo(): array # {{{
+  function __debugInfo(): array
   {
     return [
       'store' => $this->store,
@@ -1450,34 +1494,7 @@ class PromiseResult implements ArrayAccess,Loggable
     ];
   }
   # }}}
-  static function trace_info(array $t): array # {{{
-  {
-    foreach ($t as &$a)
-    {
-      $a = match ($a[0]) {
-      self::IS_INFO
-        => 'INFO: '.implode('·', $a[1]),
-      self::IS_WARNING
-        => 'WARNING: '.implode('·', $a[1]),
-      self::IS_FAILURE
-        => 'FAILURE: '.implode('·', $a[1]),
-      self::IS_ERROR
-        => 'ERROR: '.$a[1]->message(),
-      self::IS_COLUMN
-        => ['COLUMN: '.$a[2].'/'.$a[3], $a[1]],
-      self::IS_ROW
-        => ['ROW: '.$a[2].'/'.$a[3], $a[1]],
-      self::IS_FUSION
-        => ['FUSION', $a[1]],
-      self::IS_CANCELLATION
-        => ['CANCELLATION', $a[1]],
-      default
-        => '?',
-      };
-    }
-    return $t;
-  }
-  # }}}
+  # internals {{{
   function _track(): object # {{{
   {
     # check finished or doesnt have title yet
@@ -1867,10 +1884,22 @@ class PromiseResult implements ArrayAccess,Loggable
     return $this;
   }
   # }}}
+  function indexSet(int $i): self # {{{
+  {
+    $this->index = $i;
+    return $this;
+  }
+  # }}}
   function indexPlus(int $i=1): self # {{{
   {
     $this->index += $i;
     return $this;
+  }
+  # }}}
+  function rowTracks($n=0): ?array # {{{
+  {
+    return ($a = $this->track->row($n))
+      ? $a[1] : null;
   }
   # }}}
   # promise controls
@@ -2016,9 +2045,33 @@ class PromiseResultTrack
       $a['title'] = implode('·', $this->title);
       $a['span(ms)'] = (int)($this->span / 1000000);
     }
-    $a['trace'] = PromiseResult::trace_info(
-      array_reverse($this->trace)
-    );
+    ###
+    $b = [];
+    foreach ($this->trace as $c)
+    {
+      $b[] = match ($c[0]) {
+        PromiseResult::IS_INFO
+        => 'INFO: '.implode('·', $c[1]),
+        PromiseResult::IS_WARNING
+        => 'WARNING: '.implode('·', $c[1]),
+        PromiseResult::IS_FAILURE
+        => 'FAILURE: '.implode('·', $c[1]),
+        PromiseResult::IS_ERROR
+        => 'ERROR: '.$c[1]->message(),
+        PromiseResult::IS_COLUMN
+        => ['COLUMN: '.$c[2].'/'.$c[3], $c[1]],
+        PromiseResult::IS_ROW
+        => ['ROW: '.$c[2].'/'.$c[3], $c[1]],
+        PromiseResult::IS_FUSION
+        => ['FUSION', $c[1]],
+        PromiseResult::IS_CANCELLATION
+        => ['CANCELLATION', $c[1]],
+        default
+        => '?',
+      };
+    }
+    $a['trace'] = $b;
+    ###
     if ($this->prev) {
       $a['prev'] = $this->prev;
     }
@@ -2044,6 +2097,23 @@ class PromiseResultTrack
     return $this->prev
       ? $x + $this->prev->duration()
       : $x;
+  }
+  # }}}
+  function row(int $n): ?array # {{{
+  {
+    foreach ($this->trace as $a)
+    {
+      if ($a[0] === PromiseResult::IS_ROW)
+      {
+        if ($n === 0) {
+          return $a;
+        }
+        $n--;
+      }
+    }
+    return $this->prev
+      ? $this->prev->row($n)
+      : null;
   }
   # }}}
 }

@@ -3012,6 +3012,90 @@ HANDLE OpenProcess(// {{{
   If the caller has enabled the SeDebugPrivilege privilege,
   the requested access is granted regardless
   of the contents of the security descriptor.
+  ---
+  The Microsoft Windows security model enables
+  you to control access to process objects.
+  When a user logs in, the system collects
+  a set of data that uniquely identifies the user
+  during the authentication process,
+  and stores it in an access token.
+  This access token describes the security
+  context of all processes associated with
+  the user. The security context of a process
+  is the set of credentials given to the process
+  or the user account that created the process.
+  You can use a token to specify the current
+  security context for a process using the
+  CreateProcessWithTokenW function.
+  You can specify a security descriptor for
+  a process when you call the CreateProcess,
+  CreateProcessAsUser, or CreateProcessWithLogonW function.
+  If you specify NULL, the process gets a default
+  security descriptor. The ACLs in the default
+  security descriptor for a process come
+  from the primary or impersonation token of
+  the creator.To retrieve a process’s security
+  descriptor, call the GetSecurityInfo function.
+  To change a process’s security descriptor,
+  call the SetSecurityInfo function.
+  The valid access rights for process objects
+  include the standard access rights and some
+  process-specific access rights.
+  ---
+  PROCESS_ALL_ACCESS (0x1fffff)
+  All possible access rights for a process object.
+  ---
+  PROCESS_CREATE_PROCESS (0x0080)
+  Required to create a process.
+  ---
+  PROCESS_CREATE_THREAD (0x0002)
+  Required to create a thread.
+  ---
+  PROCESS_DUP_HANDLE (0x0040)
+  Required to duplicate a handle using DuplicateHandle.
+  ---
+  PROCESS_QUERY_INFORMATION (0x0400)
+  Required to retrieve certain information
+  about a process, such as its token,
+  exit code, and priority class (see OpenProcessToken).
+  ---
+  PROCESS_QUERY_LIMITED_INFORMATION (0x1000)
+  Required to retrieve certain information
+  about a process. A handle that has the
+  PROCESS_QUERY_INFORMATION access right is
+  automatically granted PROCESS_QUERY_LIMITED_INFORMATION.
+  ---
+  PROCESS_SET_INFORMATION (0x0200)
+  Required to set certain information
+  about a process, such as its priority class
+  (see SetPriorityClass).
+  ---
+  PROCESS_SET_QUOTA (0x0100)
+  Required to set memory limits using
+  SetProcessWorkingSetSize.
+  ---
+  PROCESS_SUSPEND_RESUME (0x0800)
+  Required to suspend or resume a process.
+  ---
+  PROCESS_TERMINATE (0x0001)
+  Required to terminate a process using
+  TerminateProcess.
+  ---
+  PROCESS_VM_OPERATION (0x0008)
+  Required to perform an operation on the
+  address space of a process
+  ---
+  PROCESS_VM_READ (0x0010)
+  Required to read memory in a process
+  using ReadProcessMemory.
+  ---
+  PROCESS_VM_WRITE (0x0020)
+  Required to write to memory in a process
+  using WriteProcessMemory.
+  ---
+  SYNCHRONIZE (0x00100000L)
+  Required to wait for the process to
+  terminate using the wait functions.
   }}} */
   int,/* [in] bInheritHandle {{{
   If this value is TRUE, processes created by this process
@@ -3050,6 +3134,105 @@ HANDLE OpenProcess(// {{{
   provided the appropriate access rights were requested.
   When you are finished with the handle,
   be sure to close it using the CloseHandle function.
+  }}} */
+);
+// }}}
+int TerminateProcess(// {{{
+  HANDLE, /* [in] hProcess {{{
+  A handle to the process to be terminated.
+  The handle must have the PROCESS_TERMINATE
+  access right.
+  }}} */
+  UINT /* [in] uExitCode {{{
+  The exit code to be used by the process and
+  threads terminated as a result of this call.
+  Use the GetExitCodeProcess function to retrieve
+  a process's exit value. Use the GetExitCodeThread
+  function to retrieve a thread's exit value.
+  }}} */
+  /* RETURN VALUE {{{
+  If the function succeeds, the return value is nonzero.
+  If the function fails, the return value is zero.
+  To get extended error information, call GetLastError.
+  }}} */
+  /* REMARKS {{{
+  The TerminateProcess function is used to
+  unconditionally cause a process to exit.
+  The state of global data maintained by
+  dynamic-link libraries (DLLs) may be compromised
+  if TerminateProcess is used rather than ExitProcess.
+
+  This function stops execution of all threads
+  within the process and requests cancellation
+  of all pending I/O. The terminated process cannot
+  exit until all pending I/O has been
+  completed or canceled. When a process terminates,
+  its kernel object is not destroyed until
+  all processes that have open handles to the process
+  have released those handles.
+
+  When a process terminates itself,
+  TerminateProcess stops execution of the calling
+  thread and does not return. Otherwise,
+  TerminateProcess is asynchronous;
+  it initiates termination and returns immediately.
+  If you need to be sure the process has terminated,
+  call the WaitForSingleObject function
+  with a handle to the process.
+
+  A process cannot prevent itself from being terminated.
+  After a process has terminated,
+  call to TerminateProcess with open handles
+  to the process fails with ERROR_ACCESS_DENIED (5)
+  error code.
+  }}} */
+);
+// }}}
+int GetExitCodeProcess(// {{{
+  HANDLE, /* [in]  hProcess {{{
+  A handle to the process.
+  The handle must have the PROCESS_QUERY_INFORMATION
+  or PROCESS_QUERY_LIMITED_INFORMATION access right.
+  }}}*/
+  void* /* [out] lpExitCode {{{
+  A pointer to a variable to receive the process
+  termination status. For more information, see Remarks.
+  }}} */
+  /* RETURN VALUE {{{
+  If the function succeeds,
+  the return value is nonzero.
+  If the function fails, the return value is zero.
+  To get extended error information,
+  call GetLastError.
+  }}} */
+  /* REMARKS {{{
+  This function returns immediately.
+  If the process has not terminated and
+  the function succeeds, the status returned is
+  STILL_ACTIVE (a macro for STATUS_PENDING
+  (minwinbase.h)). If the process has terminated
+  and the function succeeds, the status returned
+  is one of the following values:
+  - The exit value specified in the ExitProcess or
+  TerminateProcess function.
+  - The return value from the main or WinMain
+  function of the process.
+  - The exception value for an unhandled exception
+  that caused the process to terminate.
+  ===
+  The GetExitCodeProcess function returns
+  a valid error code defined by the application
+  only after the thread terminates. Therefore,
+  an application should not use STILL_ACTIVE (259)
+  as an error code (STILL_ACTIVE is a macro for
+  STATUS_PENDING (minwinbase.h)). If a thread returns
+  STILL_ACTIVE (259) as an error code,
+  then applications that test for that value could
+  interpret it to mean that the thread is still running,
+  and continue to test for the completion
+  of the thread after the thread has terminated,
+  which could put the application into
+  an infinite loop.
   }}} */
 );
 // }}}
@@ -3123,6 +3306,128 @@ uint32_t K32GetProcessImageFileNameA(// {{{
   add Psapi.lib to the TARGETLIBS macro and compile
   the program with -DPSAPI_VERSION=1.
   To use run-time dynamic linking, load Psapi.dll.
+  }}} */
+);
+// }}}
+uint32_t SleepEx(// {{{
+  uint32_t, /* [in] dwMilliseconds {{{
+  The time interval for which execution is to be
+  suspended, in milliseconds.
+  A value of zero causes the thread to relinquish
+  the remainder of its time slice to any other
+  thread that is ready to run. If there are
+  no other threads ready to run, the function
+  returns immediately, and the thread continues
+  execution. Windows XP: A value of zero causes
+  the thread to relinquish the remainder of its time
+  slice to any other thread of equal priority that is
+  ready to run. If there are no other threads of equal
+  priority ready to run, the function returns immediately,
+  and the thread continues execution.
+  This behavior changed starting with Windows Server 2003.
+  A value of INFINITE indicates that the suspension
+  should not time out.
+  }}} */
+  int /* [in] bAlertable {{{
+  If this parameter is FALSE, the function does not
+  return until the time-out period has elapsed.
+  If an I/O completion callback occurs,
+  the function does not immediately return and the I/O
+  completion function is not executed.
+  If an APC is queued to the thread,
+  the function does not immediately return and
+  the APC function is not executed.
+  ---
+  If the parameter is TRUE and the thread that
+  called this function is the same thread that
+  called the extended I/O function (ReadFileEx or
+  WriteFileEx), the function returns when either
+  the time-out period has elapsed or when an I/O
+  completion callback function occurs.
+  If an I/O completion callback occurs, the I/O
+  completion function is called.
+  If an APC is queued to the thread (QueueUserAPC),
+  the function returns when either the time-out
+  period has elapsed or when the APC function is called.
+  }}} */
+  /* RETURN VALUE {{{
+  The return value is zero if the specified
+  time interval expired.
+  The return value is WAIT_IO_COMPLETION
+  if the function returned due to one or more I/O
+  completion callback functions.
+  This can happen only if bAlertable is TRUE,
+  and if the thread that called the SleepEx
+  function is the same thread that called
+  the extended I/O function.
+  }}} */
+  /* REMARKS {{{
+  This function causes a thread to relinquish
+  the remainder of its time slice and become unrunnable
+  for an interval based on the value of dwMilliseconds.
+  After the sleep interval has passed,
+  the thread is ready to run. Note that a ready thread
+  is not guaranteed to run immediately.
+  Consequently, the thread will not run until
+  some arbitrary time after the sleep interval elapses,
+  based upon the system "tick" frequency and
+  the load factor from other processes.
+  The system clock "ticks" at a constant rate.
+  To increase the accuracy of the sleep interval,
+  call the timeGetDevCaps function to determine
+  the supported minimum timer resolution and
+  the timeBeginPeriod function to set the timer
+  resolution to its minimum.
+  Use caution when calling timeBeginPeriod,
+  as frequent calls can significantly affect
+  the system clock, system power usage, and the scheduler.
+  If you call timeBeginPeriod, call it one time early
+  in the application and be sure to call
+  the timeEndPeriod function at the very end
+  of the application. If you specify 0 milliseconds,
+  the thread will relinquish the remainder of its
+  time slice but remain ready. For more information,
+  see Scheduling Priorities.
+  ---
+  This function can be used with the ReadFileEx or
+  WriteFileEx functions to suspend a thread until
+  an I/O operation has been completed.
+  These functions specify a completion routine that is
+  to be executed when the I/O operation has been completed.
+  For the completion routine to be executed,
+  the thread that called the I/O function must be
+  in an alertable wait state when
+  the completion callback function occurs.
+  A thread goes into an alertable wait state
+  by calling either SleepEx, MsgWaitForMultipleObjectsEx,
+  WaitForSingleObjectEx, or WaitForMultipleObjectsEx,
+  with the function's bAlertable parameter set to TRUE.
+  ---
+  Be careful when using SleepEx in the following scenarios:
+  - Code that directly or indirectly creates windows
+  (for example, DDE and COM CoInitialize).
+  If a thread creates any windows, it must process messages.
+  Message broadcasts are sent to all windows in the system.
+  If you have a thread that uses SleepEx with infinite delay,
+  the system will deadlock.
+  - Threads that are under concurrency control.
+  For example, an I/O completion port or thread pool limits
+  the number of associated threads that can run.
+  If the maximum number of threads is already running,
+  no additional associated thread can run until
+  a running thread finishes. If a thread uses SleepEx
+  with an interval of zero to wait for one of the
+  additional associated threads to accomplish some work,
+  the process might deadlock.
+  ---
+  For these scenarios, use MsgWaitForMultipleObjects or
+  MsgWaitForMultipleObjectsEx, rather than SleepEx.
+  ---
+  Windows Phone 8.1: This function is supported for
+  Windows Phone Store apps on Windows Phone 8.1 and later.
+  Windows 8.1 and Windows Server 2012 R2:
+  This function is supported for Windows Store apps
+  on Windows 8.1, Windows Server 2012 R2, and later.
   }}} */
 );
 // }}}

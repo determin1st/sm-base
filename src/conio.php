@@ -22,6 +22,7 @@ class Conio # {{{
 {
   # TODO: keep base not gear here
   # TODO: default color management/info api
+  # TODO: refine FFI code (string terminators)
   const # {{{
     # event types {{{
     EV_ERROR  = 0x00,# ErrorEx

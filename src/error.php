@@ -4,7 +4,7 @@ namespace SM;
 use Error,Throwable;
 use function
   set_error_handler,func_num_args,
-  is_object,is_string,array_is_list,
+  is_int,is_object,is_string,array_is_list,
   implode,explode,count,array_reverse,array_pop,
   array_shift,array_unshift,array_slice,
   date,intval,strval,trim,str_repeat,

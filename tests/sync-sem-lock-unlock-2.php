@@ -1,7 +1,11 @@
 <?php declare(strict_types=1);
 namespace SM;
-require_once __DIR__.DIRECTORY_SEPARATOR.'..'.DIRECTORY_SEPARATOR.'help.php';
+require_once
+  __DIR__.DIRECTORY_SEPARATOR.
+  '..'.DIRECTORY_SEPARATOR.
+  'autoload.php';
 ###
+Conio::init() && exit();
 $o = new \SyncSemaphore('sem-lock-unlock', 1, 0);
 echo "SyncSemaphore object test\n";
 echo "press [l]ock, [u]nlock or [q]uit\n";
