@@ -534,7 +534,7 @@ int GetConsoleMode(// {{{
     see Console Buffer Security and Access Rights.
 
   }}} */
-  uint32_t* /* lpMode [out] {{{
+  void* /* lpMode [out] {{{
   A pointer to a variable that receives the current mode
   of the specified buffer.
   If the hConsoleHandle parameter is an input handle,
@@ -928,7 +928,7 @@ int GetConsoleScreenBufferInfo(// {{{
 );
 // }}}
 int SetConsoleCursorPosition(// {{{
-  int, /* hConsoleOutput [in] {{{
+  HANDLE, /* hConsoleOutput [in] {{{
   A handle to the console screen buffer.
   The handle must have the GENERIC_READ access right.
   For more information, see Console Buffer
@@ -1020,7 +1020,7 @@ int ReadConsoleInputW(// {{{
   The size of the array pointed to by the lpBuffer
   parameter, in array elements.
   }}} */
-  void* /* uint32_t* lpNumberOfEventsRead [out] {{{
+  uint32_t* /* lpNumberOfEventsRead [out] {{{
   A pointer to a variable that receives the number
   of input records read.
   }}} */
@@ -1087,7 +1087,7 @@ int ReadConsoleOutputAttribute(// {{{
   structure is the column,
   and the Y member is the row.
   }}} */
-  void* /* uint32_t* lpNumberOfAttrsRead [out] {{{
+  uint32_t* /* lpNumberOfAttrsRead [out] {{{
   A pointer to a variable that receives the number
   of attributes actually read.
   }}} */
@@ -1136,7 +1136,7 @@ int WriteConsoleA(// {{{
   characters exceeds the available heap,
   the function fails with ERROR_NOT_ENOUGH_MEMORY.
   }}} */
-  void*,/* uint32_t* lpNumberOfCharsWritten [out, optional] {{{
+  uint32_t*, /* lpNumberOfCharsWritten [out, optional] {{{
   A pointer to a variable that receives the number
   of characters actually written.
   }}} */
@@ -1208,7 +1208,8 @@ int WriteConsoleA(// {{{
 int FlushConsoleInputBuffer(// {{{
   /* INFO {{{
   Flushes the console input buffer.
-  All input records currently in the input buffer are discarded.
+  All input records currently in the input buffer
+  are discarded.
   }}} */
   HANDLE /* hConsoleInput [in] {{{
   A handle to the console input buffer.
@@ -2105,6 +2106,178 @@ int WriteFileEx(// {{{
   working with files opened with CreateFile
   using FILE_FLAG_NO_BUFFERING.
   For details see File Buffering.
+  }}} */
+);
+// }}}
+int WriteFile(// {{{
+  HANDLE, /* [in] hFile */
+  void*, /* [in] lpBuffer */
+  uint32_t, /* [in] nNumberOfBytesToWrite */
+  uint32_t*, /* [out, optional] lpNumberOfBytesWritten */
+  OVERLAPPED* /* [in, out, optional] lpOverlapped {{{
+  A pointer to an OVERLAPPED structure is required
+  if the hFile parameter was opened with
+  FILE_FLAG_OVERLAPPED, otherwise
+  this parameter can be NULL.
+  For an hFile that supports byte offsets,
+  if you use this parameter you must specify
+  a byte offset at which to start writing
+  to the file or device. This offset is specified by
+  setting the Offset and OffsetHigh members of
+  the OVERLAPPED structure. For an hFile that does not
+  support byte offsets, Offset and OffsetHigh are ignored.
+  To write to the end of file, specify both
+  the Offset and OffsetHigh members of the OVERLAPPED
+  structure as 0xFFFFFFFF. This is functionally
+  equivalent to previously calling the CreateFile
+  function to open hFile using FILE_APPEND_DATA access.
+  For more information about different combinations
+  of lpOverlapped and FILE_FLAG_OVERLAPPED,
+  see the Remarks section and the Synchronization and
+  File Position section.
+  }}} */
+  /* RETURN VALUE {{{
+  If the function succeeds, the return value is nonzero (TRUE).
+  If the function fails, or is completing asynchronously,
+  the return value is zero (FALSE).
+  To get extended error information,
+  call the GetLastError function.
+  Note  The GetLastError code ERROR_IO_PENDING
+  is not a failure; it designates the write operation
+  is pending completion asynchronously.
+  }}} */
+  /* REMARKS {{{
+  The WriteFile function returns when one of the
+  following conditions occur:
+  - The number of bytes requested is written.
+  - A read operation releases buffer space on
+  the read end of the pipe (if the write was blocked).
+  For more information, see the Pipes section.
+  - An asynchronous handle is being used and the write
+  is occurring asynchronously.
+  - An error occurs.
+
+  The WriteFile function may fail with ERROR_INVALID_USER_BUFFER
+  or ERROR_NOT_ENOUGH_MEMORY whenever there are
+  too many outstanding asynchronous I/O requests.
+  To cancel all pending asynchronous I/O operations,
+  use either:
+  CancelIo—this function cancels only operations
+  issued by the calling thread for the specified file handle.
+  CancelIoEx—this function cancels all operations
+  issued by the threads for the specified file handle.
+  Use the CancelSynchronousIo function to cancel
+  pending synchronous I/O operations.
+  I/O operations that are canceled complete with
+  the error ERROR_OPERATION_ABORTED.
+
+  The WriteFile function may fail with
+  ERROR_NOT_ENOUGH_QUOTA, which means the calling
+  process's buffer could not be page-locked.
+  For more information, see SetProcessWorkingSetSize.
+  If part of the file is locked by another process
+  and the write operation overlaps the locked portion,
+  WriteFile fails.
+  When writing to a file, the last write time
+  is not fully updated until all handles used for
+  writing have been closed. Therefore,
+  to ensure an accurate last write time,
+  close the file handle immediately
+  after writing to the file.
+  Accessing the output buffer while a write operation
+  is using the buffer may lead to corruption of
+  the data written from that buffer.
+  Applications must not write to, reallocate,
+  or free the output buffer that a write operation
+  is using until the write operation completes.
+  This can be particularly problematic when using
+  an asynchronous file handle. Additional information
+  regarding synchronous versus asynchronous file handles
+  can be found later in the Synchronization and
+  File Position section and Synchronous and Asynchronous I/O.
+  Note that the time stamps may not be updated correctly
+  for a remote file. To ensure consistent results,
+  use unbuffered I/O.
+  The system interprets zero bytes to write
+  as specifying a null write operation and
+  WriteFile does not truncate or extend the file.
+  To truncate or extend a file, use the SetEndOfFile function.
+  Characters can be written to the screen buffer
+  using WriteFile with a handle to console output.
+  The exact behavior of the function is determined
+  by the console mode. The data is written to the current
+  cursor position. The cursor position is updated after
+  the write operation. For more information about
+  console handles, see CreateFile.
+
+  When writing to a communications device,
+  the behavior of WriteFile is determined by
+  the current communication time-out as set and
+  retrieved by using the SetCommTimeouts and
+  GetCommTimeouts functions. Unpredictable results
+  can occur if you fail to set the time-out values.
+  For more information about communication time-outs,
+  see COMMTIMEOUTS.
+
+  Although a single-sector write is atomic,
+  a multi-sector write is not guaranteed to be atomic
+  unless you are using a transaction (that is,
+  the handle created is a transacted handle;
+  for example, a handle created using CreateFileTransacted).
+  Multi-sector writes that are cached may not always be
+  written to the disk right away; therefore,
+  specify FILE_FLAG_WRITE_THROUGH in CreateFile to ensure
+  that an entire multi-sector write is written
+  to the disk without potential caching delays.
+
+  If you write directly to a volume that has
+  a mounted file system, you must first obtain
+  exclusive access to the volume. Otherwise, you risk
+  causing data corruption or system instability,
+  because your application's writes may conflict with
+  other changes coming from the file system and leave
+  the contents of the volume in an inconsistent state.
+  To prevent these problems, the following changes
+  have been made in Windows Vista and later:
+  - A write on a volume handle will succeed
+  if the volume does not have a mounted file system,
+  or if one of the following conditions is true:
+  -- The sectors to be written to are boot sectors.
+  -- The sectors to be written to reside outside
+  of file system space.
+  -- You have explicitly locked or dismounted
+  the volume by using FSCTL_LOCK_VOLUME or
+  FSCTL_DISMOUNT_VOLUME.
+  -- The volume has no actual file system.
+  (In other words, it has a RAW file system mounted.)
+  - A write on a disk handle will succeed
+  if one of the following conditions is true:
+  -- The sectors to be written to do not
+  fall within a volume's extents.
+  -- The sectors to be written to fall
+  within a mounted volume, but you have explicitly locked
+  or dismounted the volume by using FSCTL_LOCK_VOLUME
+  or FSCTL_DISMOUNT_VOLUME.
+  -- The sectors to be written to fall
+  within a volume that has no mounted
+  file system other than RAW.
+
+  There are strict requirements for successfully working
+  with files opened with CreateFile using
+  FILE_FLAG_NO_BUFFERING. For details see File Buffering.
+  If hFile was opened with FILE_FLAG_OVERLAPPED,
+  the following conditions are in effect:
+  - The lpOverlapped parameter must point to a valid and
+  unique OVERLAPPED structure, otherwise the function
+  can incorrectly report that the write operation
+  is complete.
+  - The lpNumberOfBytesWritten parameter
+  should be set to NULL. To get the number of
+  bytes written, use the GetOverlappedResult
+  function. If the hFile parameter is associated
+  with an I/O completion port, you can also get
+  the number of bytes written by calling
+  the GetQueuedCompletionStatus function.
   }}} */
 );
 // }}}
@@ -3429,6 +3602,18 @@ uint32_t SleepEx(// {{{
   This function is supported for Windows Store apps
   on Windows 8.1, Windows Server 2012 R2, and later.
   }}} */
+);
+// }}}
+uint32_t WaitForSingleObject(// {{{
+  HANDLE,  // [in] hHandle
+  uint32_t // [in] dwMilliseconds
+);
+// }}}
+int GetOverlappedResult(// {{{
+  HANDLE,      // [in]  hFile
+  OVERLAPPED*, // [in]  lpOverlapped
+  uint32_t*,   // [out] lpNumberOfBytesTransferred
+  int          // [in]  bWait
 );
 // }}}
 /// }}}

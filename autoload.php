@@ -17,6 +17,7 @@ define('SM\\AUTO', new class()
     'SM\\Loop'          => 'promise.php',
     'SM\\SyncExchange'  => 'sync.php',
     'SM\\SyncAggregate' => 'sync.php',
+    'SM\\Sys'           => 'sysapi.php'
   ];
   public bool $ready=false;
   function autoload(string $class): void

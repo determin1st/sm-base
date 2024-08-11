@@ -7,70 +7,66 @@ use function
 ###
 abstract class Conio_Base extends Conio_PseudoBase
 {
-  # constants {{{
-  const ASK = "\x1B[0c";# DA1
-  const FLAGS = [
-    [# 0:input {{{
-    'PROCESSED_INPUT' => 0x0001,
-    'LINE_INPUT'      => 0x0002,
-    'ECHO_INPUT'      => 0x0004,
-    'WINDOW_INPUT'    => 0x0008,# buggy!
-    'MOUSE_INPUT'     => 0x0010,
-    'INSERT_MODE'     => 0x0020,
-    'QUICK_EDIT_MODE' => 0x0040,
-    'EXTENDED_FLAGS'  => 0x0080,
-    'AUTO_POSITION'   => 0x0100,
-    'VIRTUAL_TERMINAL_INPUT' => 0x0200 # buggy!
+  const # {{{
+    ASK = "\x1B[0c",# DA1
+    FLAGS = [
+      [# 0:input {{{
+      'PROCESSED_INPUT' => 0x0001,
+      'LINE_INPUT'      => 0x0002,
+      'ECHO_INPUT'      => 0x0004,
+      'WINDOW_INPUT'    => 0x0008,# buggy!
+      'MOUSE_INPUT'     => 0x0010,
+      'INSERT_MODE'     => 0x0020,
+      'QUICK_EDIT_MODE' => 0x0040,
+      'EXTENDED_FLAGS'  => 0x0080,
+      'AUTO_POSITION'   => 0x0100,
+      'VIRTUAL_TERMINAL_INPUT' => 0x0200 # buggy!
+      ],
+      # }}}
+      [# 1:output {{{
+      'PROCESSED_OUTPUT'   => 0x0001,
+      'WRAP_AT_EOL_OUTPUT' => 0x0002,
+      'VIRTUAL_TERMINAL_PROCESSING' => 0x0004,
+      'DISABLE_NEWLINE_AUTO_RETURN' => 0x0008,
+      'LVB_GRID_WORLDWIDE' => 0x0010
+      ]
+      # }}}
     ],
-    # }}}
-    [# 1:output {{{
-    'PROCESSED_OUTPUT'   => 0x0001,
-    'WRAP_AT_EOL_OUTPUT' => 0x0002,
-    'VIRTUAL_TERMINAL_PROCESSING' => 0x0004,
-    'DISABLE_NEWLINE_AUTO_RETURN' => 0x0008,
-    'LVB_GRID_WORLDWIDE' => 0x0010
-    ]
-    # }}}
-  ];
-  const TERMID = [
-    0    => 'dumb conhost',
-    1920 => 'conhost',
-    1264 => 'ansicon',
-    1176 => 'ConEmu',
-    1056 => 'Windows Terminal',
-  ];
+    TERMID = [
+      0    => 'dumb conhost',
+      1920 => 'conhost',
+      1264 => 'ansicon',
+      1176 => 'ConEmu',
+      1056 => 'Windows Terminal',
+    ];
+  ###
   # }}}
-  # constructor {{{
-  public int $recSize;# sizeof(INPUT_RECORD)
+  # basis {{{
   public int $keyboard=2;
   static function new(): object
   {
-    # prepare
-    $api  = FFI::load(__DIR__.'\\conio-kernel32.h');
-    $mem  = self::malloc($api, self::MEM_SIZE);
-    $base = null;
     # to be able to restore the terminal,
-    # proceed into guarded section
+    # operate in a guarded section
+    $base = null;
     try
     {
       # open I/O handles
-      [$h0, $h1, $ds] =
-        self::get_handles($api, $mem);
+      $h0 = self::con_handle(0);
+      $h1 = self::con_handle(1);
+      $ds = 'CON';
       # get current/initial mode of the terminal,
       # this is made before construction to
       # stress the system stability (fail fast)
-      $mode = self::get_mode($api, $mem, $h0, $h1);
-      $isVt = self::is_virtual(
-        $api, $mem, $h0, $mode['sio'][0]
-      );
+      $mode = self::get_mode($h0, $h1);
+      $isVt = self::is_virtual($h0, $mode['sio'][0]);
       # construct specific instance
-      $base = self::is_async($api, $mem, $h1)
+      $base = self::is_async($h1)
         ? ($isVt
-          ? new Conio_BaseAP($api,$mem,$h0,$h1,$ds,$mode)
-          : new Conio_BaseAD($api,$mem,$h0,$h1,$ds,$mode))
+          ? new Conio_BaseAP($h0, $h1, $ds, $mode)
+          : new Conio_BaseAD($h0, $h1, $ds, $mode))
         : ($isVt
-          ? new Conio_BaseSP($api,$mem,$h0,$h1,$ds,$mode)
-          : new Conio_BaseSD($api,$mem,$h0,$h1,$ds,$mode));
+          ? new Conio_BaseSP($h0, $h1, $ds, $mode)
+          : new Conio_BaseSD($h0, $h1, $ds, $mode));
       #####
       # initialize
       $base->setConstructed();
@@ -85,95 +81,41 @@ abstract class Conio_Base extends Conio_PseudoBase
     }
     catch (Throwable $e)
     {
-      # restore/cleanup
-      if ($base)
-      {
-        $base->__destruct();
-        $base = null;# destruct
-      }
-      else {
-        FFI::free($mem);
-      }
+      echo ErrorLog::render(ErrorEx::from($e));
+      echo "[ERROR";
+      $base && $base->deconstruct();
+      echo "]";
       throw $e;
     }
     return $base;
   }
   # }}}
   # stasis {{{
-  static function strerror(# {{{
-    object $api, object $mem, int $e=0
-  ):string
-  {
-    # get last error number
-    if (!$e && !($e = $api->GetLastError())) {
-      return '';
-    }
-    # allocate buffer (wide chars, utf16) and
-    # get error transcription
-    $i = $api->FormatMessageW(0
-      |0x00001000 # FORMAT_MESSAGE_FROM_SYSTEM
-      |0x00000200 # FORMAT_MESSAGE_IGNORE_INSERTS
-      |0,
-      null, $e, 0, $mem, 1000, null
-    );
-    # when failed, return hex code
-    if (!$i) {
-      return 'ERROR=0x'.dechex($e);
-    }
-    # extract the result and
-    # convert it into utf8
-    $s = FFI::string($mem, 2 * $i);
-    $i = $api->WideCharToMultiByte(
-      65001, 0, $s, $i,
-      $mem, self::MEM_SIZE,
-      null, null
-    );
-    # errors returned by the WinOS
-    # may contain undesireable whitespace..
-    return $i
-      ? trim(FFI::string($mem, $i))
-      : 'ERROR=0x'.dechex($e);
-    ###
-  }
-  # }}}
   static function error(# {{{
-    object $api, object $mem,
-    string $func, string $more=''
+    string $func, string $more='', int $x=0
   ):object
   {
-    $f = 'kernel32::'.$func;
-    $e = self::strerror($api, $mem);
-    return ($e !== '')
-      ? (($more !== '')
-        ? ErrorEx::fatal($f, $more, $e)
-        : ErrorEx::fatal($f, $e))
-      : (($more !== '')
-        ? ErrorEx::fatal($f, $more)
-        : ErrorEx::fatal($f));
+    $e = Sys::last_error($x);
+    $s = $e[1] ? $e[1] : 'ERROR='.$x;
+    return ($more !== '')
+      ? ErrorEx::fatal_up(1, $func, $more, $s)
+      : ErrorEx::fatal_up(1, $func, $s);
   }
   # }}}
-  static function con_handle(# {{{
-    object $api, object $mem, int $i
-  ):int
+  static function con_handle(int $i): int # {{{
   {
-    /*** STD HANDLES ***
-    static $hstd=[0xFFFFFFF6, 0xFFFFFFF5];
-    if ($i === 0) {
-      return $api->GetStdHandle($hstd[$i]);
-    }
-    /***/
     # prepare
     static $hname=['CONIN$','CONOUT$'];
     static $flags=[
-      # input
+      # read/input
       0x20000000, # FILE_FLAG_NO_BUFFERING
-      # output
+      # write/output
       0x20000000  # FILE_FLAG_NO_BUFFERING
       |0x40000000 # FILE_FLAG_OVERLAPPED
       |0x80000000 # FILE_FLAG_WRITE_THROUGH
     ];
     # open new handle
-    $h = $api->CreateFileA($hname[$i],
+    $h = Sys::$API->CreateFileA($hname[$i],
       0x80000000|0x40000000,# read/write access
       0x00000001|0x00000002,# shared read/write
       null,# cannot be inherited by child
@@ -181,121 +123,68 @@ abstract class Conio_Base extends Conio_PseudoBase
       $flags[$i], 0
     );
     # check failed
-    if ($h < 1 || $h > 2147483647)
-    {
-      throw self::error(
-        $api, $mem, 'CreateFileA', $hname[$i]
-      );
+    if ($h === -1) {
+      throw self::error('CreateFileA', $hname[$i]);
     }
     return $h;
   }
   # }}}
-  static function con_info(# {{{
-    object $api, object $mem, int $h
-  ):object
+  static function con_info(int $handle): object # {{{
   {
-    # prepare structure
-    $a = $api->cast(
-      'CONSOLE_SCREEN_BUFFER_INFO', $mem
-    );
-    FFI::memset($a, 0, FFI::sizeof($a));
-    # invoke
-    $b = $api->GetConsoleScreenBufferInfo(
-      $h, FFI::addr($a)
-    );
-    # check failed
-    if (!$b)
-    {
-      throw self::error(
-        $api, $mem, 'GetConsoleScreenBufferInfo'
-      );
+    if ($info = Sys::console_info($handle)) {
+      return $info;
     }
-    # complete
-    return $a;
+    throw self::error('GetConsoleScreenBufferInfo');
   }
   # }}}
-  static function con_mode_get(# {{{
-    object $api, object $mem, int $h
-  ):int
+  static function con_mode_get(int $handle): int # {{{
   {
-    $n = $api->cast('uint32_t', $mem);
-    if ($api->GetConsoleMode($h, FFI::addr($n))) {
-      return $n->cdata;
+    if (~($n = Sys::get_console_mode($handle))) {
+      return $n;
     }
-    throw self::error(
-      $api, $mem, 'GetConsoleMode'
-    );
+    throw self::error('GetConsoleMode');
   }
   # }}}
-  static function con_mode_set(# {{{
-    object $api, object $mem, int $h, int $x
-  ):int
+  static function con_mode_set(int $handle, int $mode): int # {{{
   {
-    if ($api->SetConsoleMode($h, $x)) {
-      return $x;
+    if (Sys::set_console_mode($handle, $mode)) {
+      return $mode;
     }
-    throw self::error(
-      $api, $mem, 'SetConsoleMode'
-    );
+    throw self::error('SetConsoleMode');
   }
   # }}}
-  static function con_i_cp(# {{{
-    object $api, object $mem, int $cp=0
-  ):int
+  static function con_i_cp(int $cp=0): int # {{{
   {
     # setter?
     if ($cp)
     {
-      if ($api->SetConsoleCP($cp)) {
+      if (Sys::$API->SetConsoleCP($cp)) {
         return $cp;
       }
-      throw self::error(
-        $api, $mem, 'SetConsoleCP'
-      );
+      throw self::error('SetConsoleCP');
     }
     # getter!
-    if ($cp = $api->GetConsoleCP()) {
+    if ($cp = Sys::$API->GetConsoleCP()) {
       return $cp;
     }
-    throw self::error(
-      $api, $mem, 'GetConsoleCP'
-    );
+    throw self::error('GetConsoleCP');
   }
   # }}}
-  static function con_o_cp(# {{{
-    object $api, object $mem, int $cp=0
-  ):int
+  static function con_o_cp(int $cp=0): int # {{{
   {
     # setter?
     if ($cp)
     {
-      if ($api->SetConsoleOutputCP($cp)) {
+      if (Sys::$API->SetConsoleOutputCP($cp)) {
         return $cp;
       }
-      throw self::error(
-        $api, $mem, 'SetConsoleOutputCP'
-      );
+      throw self::error('SetConsoleOutputCP');
     }
     # getter!
-    if ($cp = $api->GetConsoleCP()) {
+    if ($cp = Sys::$API->GetConsoleCP()) {
       return $cp;
     }
-    throw self::error(
-      $api, $mem, 'GetConsoleOutputCP'
-    );
-  }
-  # }}}
-  static function get_handles(# {{{
-    object $api, object $mem
-  ):array
-  {
-    # lets get bound console handles
-    # that are not affected by redirection
-    return [
-      self::con_handle($api, $mem, 0),
-      self::con_handle($api, $mem, 1),
-      'CON'
-    ];
+    throw self::error('GetConsoleOutputCP');
   }
   # }}}
   static function get_size(object $info): array # {{{
@@ -328,19 +217,19 @@ abstract class Conio_Base extends Conio_PseudoBase
   }
   # }}}
   static function get_mode(# {{{
-    object $api, object $mem, int $h0, int $h1
+    int $h0, int $h1
   ):array
   {
-    $info   = self::con_info($api, $mem, $h1);
+    $info   = self::con_info($h1);
     $size   = self::get_size($info);
     $scroll = self::get_scroll($info);
     $cursor = self::get_cursor($info);
     return [
       'sio' => [
-        self::con_mode_get($api, $mem, $h0),
-        self::con_mode_get($api, $mem, $h1),
-        self::con_i_cp($api, $mem),
-        self::con_o_cp($api, $mem)
+        self::con_mode_get($h0),
+        self::con_mode_get($h1),
+        self::con_i_cp(),
+        self::con_o_cp()
       ],
       'size'   => $size,
       'scroll' => $scroll,
@@ -350,21 +239,21 @@ abstract class Conio_Base extends Conio_PseudoBase
   }
   # }}}
   static function is_virtual(# {{{
-    object $api, object $mem, int $h0, int $m0
+    int $handle, int $mode
   ):bool
   {
     # check terminal is already in virtual mode
     $x = self::FLAGS[0]['VIRTUAL_TERMINAL_INPUT'];
-    if ($x & $m0) {
+    if ($x & $mode) {
       return true;# already set - supported
     }
     # make a probe
-    $api->SetConsoleMode($h0, $m0|$x);
-    $x = $api->GetLastError();
+    Sys::set_console_mode($handle, $mode|$x);
+    $x = Sys::get_last_error();
     # supported or not, the mode value
     # could be spoiled with this bit,
     # set it back
-    $api->SetConsoleMode($h0, $m0);
+    Sys::set_console_mode($handle, $mode);
     # check the probe result
     switch ($x) {
     case 0:# ERROR_SUCCESS
@@ -373,27 +262,22 @@ abstract class Conio_Base extends Conio_PseudoBase
       return false;# supported not
     }
     # unexpected
-    throw ErrorEx::fail(
-      'kernel32::SetConsoleMode',
-      self::strerror($api, $mem, $x)
-    );
+    throw self::error('SetConsoleMode', '', $x);
   }
   # }}}
-  static function is_async(# {{{
-    object $api, object $mem, int $h
-  ):bool
+  static function is_async(int $handle): bool # {{{
   {
     # prepare
     $w = 100;# attempts
-    $f = (function() use (&$w): void
+    $f = (static function() use (&$w): void
     {
       $w = -1;# success
     });
-    $o = $api->cast('OVERLAPPED', $mem);
-    FFI::memset($o, 0, FFI::sizeof($o));
-    # invoke (null-write operation)
-    $api->WriteFileEx(
-      $h, null, 0, FFI::addr($o), $f
+    # probe with null-write operation
+    $api = Sys::$API;
+    $mem = Sys::_OVERLAPPED();
+    Sys::$API->WriteFileEx(
+      $handle, null, 0, FFI::addr($mem), $f
     );
     # handle failure
     switch ($e = $api->GetLastError()) {
@@ -402,11 +286,8 @@ abstract class Conio_Base extends Conio_PseudoBase
     case 6:# ERROR_INVALID_HANDLE
       # asynchronous write is not supported
       return false;
-    default:# unexpected error
-      throw ErrorEx::fatal(
-        'kernel32::WriteFileEx',
-        self::strerror($api, $mem, $e)
-      );
+    default:# unexpected
+      throw self::error('WriteFileEx', '', $e);
     }
     # wait for completion
     do {Loop::cooldown();}
@@ -415,51 +296,52 @@ abstract class Conio_Base extends Conio_PseudoBase
     return $w < 0;
   }
   # }}}
-  static function kbhit(# {{{
-    object $api, object $mem, int $handle
-  ):int
+  static function kbhit(int $handle): int # {{{
   {
-    $o = $api->cast('uint32_t', $mem);
-    $i = $api->GetNumberOfConsoleInputEvents(
-      $handle, FFI::addr($o)
-    );
-    if ($i) {
-      return $o->cdata;
+    $n = Sys::get_number_of_console_input_events($handle);
+    if ($n >= 0) {
+      return $n;
     }
-    throw self::error(
-      $api, $mem, 'GetNumberOfConsoleInputEvents'
-    );
+    throw self::error('GetNumberOfConsoleInputEvents');
   }
   # }}}
-  static function get_input(# {{{
-    object $api, object $mem, int $h, int $n
-  ):object
+  static function con_input(int $handle, int $n): object # {{{
   {
-    static $k = "\x00\x00\x00\x00";
-    $o = $api->cast('INPUT_RECORD['.$n.']', $mem);
-    FFI::memset($o, 0, FFI::sizeof($o));
-    if (!$api->ReadConsoleInputW($h, $o, $n, $k))
-    {
-      throw self::error(
-        $api, $mem, 'ReadConsoleInputW'
-      );
+    if ($o = Sys::read_console_input($handle, $n)) {
+      return $o;
     }
-    /*** REDUNDANT? ***
-    $i = unpack('L', $k)[1];
-    if ($i !== $n)
-    {
-      throw ErrorEx::fatal(
-        'kernel32::ReadConsoleInputW',
-        $i.' records read but '.
-        $n.' records were pending'
-      );
+    throw self::error('ReadConsoleInputW');
+  }
+  # }}}
+  static function con_input_flush(int $handle): void # {{{
+  {
+    $x = Sys::flush_console_input_buffer($handle);
+    if ($x) {return;}
+    throw self::error('FlushConsoleInputBuffer');
+  }
+  # }}}
+  static function con_output_attr(int $handle, int $n, int $x, int $y): object # {{{
+  {
+    $o = Sys::read_console_output_attribute(
+      $handle, $n, $x, $y
+    );
+    if ($o) {
+      return $o;
     }
-    /***/
-    return $o;
+    throw self::error('ReadConsoleOutputAttribute');
+  }
+  # }}}
+  static function con_cursor_pos(int $handle, int $x, int $y): void # {{{
+  {
+    $res = Sys::set_console_cursor_position(
+      $handle, $x, $y
+    );
+    if ($res) {return;}
+    throw self::error('SetConsoleCursorPosition');
   }
   # }}}
   # }}}
-  # getters {{{
+  # dynamis {{{
   function probeColors(): int # {{{
   {
     return $this->ansi ? 24 : 0;
@@ -468,13 +350,12 @@ abstract class Conio_Base extends Conio_PseudoBase
   function getId(): string # {{{
   {
     # prepare
-    static $NumberOfAttrsRead="\x00\x00\x00\x00";
-    $api  = $this->api;
-    $mem  = $this->varmem;
-    $hOut = $this->f1;
-    $info = self::con_info($api, $mem, $hOut);
-    $attr = $api->cast('uint16_t', $mem);
-    $ptr  = FFI::addr($attr);
+    $hndl = $this->f1;
+    $res  = self::con_info($hndl);
+    $x    = $res->dwCursorPosition->X;
+    $y    = $res->dwCursorPosition->Y;
+    $s0   = "\x1B[38;2;";
+    $s1   = ";0;0m \x1B[0m";
     $mask = 0
       |0x0001   # FOREGROUND_BLUE
       |0x0002   # FOREGROUND_GREEN
@@ -482,105 +363,39 @@ abstract class Conio_Base extends Conio_PseudoBase
       |0x0008;  # FOREGROUND_INTENSITY
     ###
     # calculate checksum
-    for ($x=0,$i=0; $i < 256; ++$i)
+    for ($z=0,$i=0; $i < 256; $i+=8)
     {
-      # print and read color attribute
-      $this->puts("\x1B[38;2;".$i.";0;0m \x1B[0m");
-      $k = $api->ReadConsoleOutputAttribute(
-        $hOut, $ptr, 1, $info->dwCursorPosition,
-        $NumberOfAttrsRead
+      # print space chars with background color
+      $this->puts(
+        $s0.($i + 0).$s1.$s0.($i + 1).$s1.
+        $s0.($i + 2).$s1.$s0.($i + 3).$s1.
+        $s0.($i + 4).$s1.$s0.($i + 5).$s1.
+        $s0.($i + 6).$s1.$s0.($i + 7).$s1
       );
-      if (!$k)
-      {
-        throw self::error(
-          $api, $mem, 'ReadConsoleOutputAttribute'
-        );
+      # read printed attributes and
+      # sum the color part of the attribute
+      $res = self::con_output_attr(
+        $hndl, 8, $x, $y
+      );
+      for ($j=0,$k=$res->cnt; $j < $k; ++$j) {
+        $z += ($res->attr[$j] & $mask);
       }
       # restore cursor position
-      $k = $api->SetConsoleCursorPosition(
-        $hOut, $info->dwCursorPosition
-      );
-      if (!$k)
-      {
-        throw self::error(
-          $api, $mem, 'SetConsoleCursorPosition'
-        );
-      }
-      # sum the color part of the attribute
-      $x += ($attr->cdata & $mask);
+      self::con_cursor_pos($hndl, $x, $y);
     }
     # complete
-    return isset(self::TERMID[$x])
-      ? self::TERMID[$x]
-      : 'unknown ('.$x.')';
-  }
-  # }}}
-  function getProcessList(int $max=10): array # {{{
-  {
-    ############
-    ### TODO ###
-    ############
-    # get the list of process identifiers
-    $api = $this->api;
-    $lst = str_repeat("\x00\x00\x00\x00", $max);
-    $n = $api->GetConsoleProcessList($lst, $max);
-    if (!$n)
-    {
-      throw ErrorEx::fail(
-        'kernel32::GetConsoleProcessList',
-        ($this->lastError)()
-      );
-    }
-    elseif ($n > $max) {# bigger buffer needed
-      return $this->getProcessList($n);
-    }
-    # iterate the list and get each process details,
-    # skip the first process as it refers to myself
-    $path = str_repeat("\x00", 500);
-    for ($a=[],$i=1; $i < $n; ++$i)
-    {
-      # get process handle from identifier
-      $pid = unpack('L', substr($lst, 4*$i, 4))[1];
-      $h = $api->OpenProcess(0x1000, false, $pid);
-      if (!$h)
-      {
-        throw ErrorEx::fail(
-          'kernel32::OpenProcess',
-          ($this->lastError)()
-        );
-      }
-      # get path to executable (dont fail here)
-      $j = $api->K32GetProcessImageFileNameA(
-        $h, $path, 500
-      );
-      $s = $j ? substr($path, 0, $j) : '';
-      # cleanup
-      if (!$api->CloseHandle($h))
-      {
-        throw ErrorEx::fail(
-          'kernel32::CloseHandle',
-          ($this->lastError)()
-        );
-      }
-      # extract executable name
-      $name = ($j = strrpos($s, '\\'))
-        ? substr($s, $j + 1)
-        : $s;
-      # add process info
-      $a[] = [$pid, $name, $s];
-    }
-    return $a;
+    return isset(self::TERMID[$z])
+      ? self::TERMID[$z]
+      : 'unknown ('.$z.')';
   }
   # }}}
   function gets(int $timeout=0): string # {{{
   {
     # prepare
     $timeout || $timeout = $this->timeout;
-    $api = $this->api;
-    $mem = $this->varmem;
-    $h   = $this->f0;
+    $handle = $this->f0;
     # wait for the input
-    while (!($n = self::kbhit($api, $mem, $h)))
+    while (!($cnt = self::kbhit($handle)))
     {
       if (($timeout -= 5) < 0) {
         return '';# timed out
@@ -589,32 +404,32 @@ abstract class Conio_Base extends Conio_PseudoBase
     }
     # get input records and
     # filter them into a string
-    $r = self::get_input($api, $mem, $h, $n);
-    for ($s='',$i=0; $i < $n; ++$i)
+    $input = self::con_input($handle, $cnt);
+    $rec = $input->rec;
+    $cnt = $input->cnt;
+    for ($s='',$i=0; $i < $cnt; ++$i)
     {
-      if (($e = $r[$i])->EventType !== 0x0001) {
+      # skip non-keyboard
+      $e = $rec[$i];
+      if ($e->EventType !== 0x0001) {
         continue;
       }
+      # skip keyups and physical input (keycodes)
       $e = $e->Event->KeyEvent;
       if (!$e->bKeyDown || $e->wVirtualKeyCode) {
         continue;
       }
       $s .= self::u8chr($e->uChar);
     }
+    # cleanup and complete
+    unset($e,$rec,$cnt,$input);
     return $s;
   }
   # }}}
-  # }}}
-  # setters {{{
   function setConstructed(): void # {{{
   {
-    # set record size constant
-    $this->recSize =
-      $this->api->type('INPUT_RECORD')->getSize();
     # set applied mode
-    $this->setMode(
-      static::get_applied_mode()
-    );
+    $this->setMode(static::get_applied_mode());
   }
   # }}}
   function setMode(array $m): void # {{{
@@ -625,63 +440,32 @@ abstract class Conio_Base extends Conio_PseudoBase
     # set system-related modes
     if (isset($m['sio']))
     {
-      $api = $this->api;
-      $mem = $this->varmem;
       $a = $m['sio'];
       $b = &$this->sio;
-      if ($a[0] !== $b[0])
-      {
-        self::con_mode_set(
-          $api, $mem, $this->f0, $b[0] = $a[0]
-        );
+      if ($a[0] !== $b[0]) {
+        self::con_mode_set($this->f0, $b[0] = $a[0]);
       }
-      if ($a[1] !== $b[1])
-      {
-        self::con_mode_set(
-          $api, $mem, $this->f1, $b[1] = $a[1]
-        );
+      if ($a[1] !== $b[1]) {
+        self::con_mode_set($this->f1, $b[1] = $a[1]);
       }
       if ($a[2] && $a[2] !== $b[2]) {
-        self::con_i_cp($api, $mem, $b[2] = $a[2]);
+        self::con_i_cp($b[2] = $a[2]);
       }
       if ($a[3] && $a[3] !== $b[3]) {
-        self::con_o_cp($api, $mem, $b[3] = $a[3]);
+        self::con_o_cp($b[3] = $a[3]);
       }
-    }
-  }
-  # }}}
-  function setCursorPos(array $xy): void # {{{
-  {
-    $api  = $this->api;
-    $mem  = $this->varmem;
-    $h    = $this->f1;
-    $o    = $api->cast('COORD', $mem);
-    $o->X = $xy[0];
-    $o->Y = $xy[1];
-    if (!$api->SetConsoleCursorPosition($h, $o))
-    {
-      throw self::error(
-        $api, $mem, 'SetConsoleCursorPosition'
-      );
     }
   }
   # }}}
   function puts(string $s): void # {{{
   {
-    $x = $this->api->WriteConsoleA(
-      $this->f1, $s, strlen($s),
-      $this->varmem, null
-    );
-    if (!$x)
-    {
-      throw self::error(
-        $this->api, $this->varmem, 'WriteConsoleA'
-      );
+    if (Sys::write_console($this->f1, $s) < 0) {
+      throw self::error('WriteConsoleA');
     }
   }
   # }}}
   # }}}
-  # essentials {{{
+  # concretis {{{
   function init(): bool # {{{
   {
     # invoke common initializer
@@ -693,9 +477,9 @@ abstract class Conio_Base extends Conio_PseudoBase
       $a = $this->cursor;
       $a[0] += $this->scroll[2] - 1;
       $a[1] += $this->scroll[3] - 1;
-      $this->setCursorPos($a);
+      self::con_cursor_pos($this->f1, $a[0], $a[1]);
       $this->puts('          ');
-      $this->setCursorPos($a);
+      self::con_cursor_pos($this->f1, $a[0], $a[1]);
       # dumb terminal is acceptable,
       # set identity and complete
       $this->id = self::TERMID[0];
@@ -726,30 +510,19 @@ abstract class Conio_Base extends Conio_PseudoBase
   # }}}
   function read(): bool # {{{
   {
-    # prepare
-    $api = $this->api;
-    $mem = $this->varmem;
-    $i   = $this->f0;
     # check no pending input
-    if (!($n = self::kbhit($api, $mem, $i))) {
+    $i = $this->f0;
+    if (!($count = self::kbhit($i))) {
       return false;
     }
-    # determine space required for event records and
-    # check for the rupture/overflow
-    if ($n * $this->recSize > self::MEM_SIZE)
+    # get input records
+    $input = self::con_input($i, $count);
+    $rec = $input->rec;
+    $cnt = $input->cnt;
+    # parse
+    for ($i=0; $i < $cnt; ++$i)
     {
-      $this->clearInput();
-      $this->error = ErrorEx::warn(
-        'input overflow (cleared)'
-      );
-      return true;
-    }
-    # parse records
-    $r = self::get_input($api, $mem, $i, $n);
-    $s = '';
-    for ($i=0; $i < $n; ++$i)
-    {
-      $e = $r[$i];
+      $e = $rec[$i];
       switch ($j = $e->EventType) {
       case 0x0001:# KEY_EVENT {{{
         ###
@@ -853,22 +626,25 @@ abstract class Conio_Base extends Conio_PseudoBase
         $this->error = ErrorEx::warn(
           'kernel32::ReadConsoleInputW',
           'unknown EventType='.$j.
-          ' of the INPUT_RECORD#'.$i.'/'.$n
+          ' of the INPUT_RECORD#'.$i.'/'.$cnt
         );
         break 2;# skip the rest
         # }}}
       }
     }
+    # update / recurse
+    $x = $this->setPending();
+    $y = ($cnt < $count) ? $this->read() : false;
+    # cleanup
+    unset($e,$rec,$cnt,$input);
     # complete
-    return $this->setPending();
+    return $x || $y;
   }
   # }}}
   function resize(): bool # {{{
   {
     # get console information
-    $o = self::con_info(
-      $this->api, $this->varmem, $this->f1
-    );
+    $o  = self::con_info($this->f1);
     $a1 = self::get_size($o);
     $a2 = self::get_scroll($o);
     $b1 = $a1 !== $this->size;
@@ -895,40 +671,25 @@ abstract class Conio_Base extends Conio_PseudoBase
   # }}}
   function write(): void # {{{
   {
-    # write
-    $res = $this->api->WriteConsoleA(
-      $this->f1, $this->writeBuf1,
-      $this->writeLen1, $this->varmem, null
+    $res = Sys::write_console(
+      $this->f1, $this->writeBuf1, $this->writeLen1
     );
-    # cleanup
     $this->writeBuf1 = '';
     $this->writeLen1 = 0;
-    # complete
-    if ($res) {
-      $this->setWriteComplete();
-    }
-    else
+    if ($res < 0)
     {
       $this->writing = -1;
-      $this->error = self::error(
-        $this->api, $this->varmem, 'WriteConsoleA'
-      );
+      $this->error = self::error('WriteConsoleA');
+    }
+    else {
+      $this->setWriteComplete();
     }
   }
   # }}}
   function clearInput(): void # {{{
   {
     parent::clearInput();
-    $x = $this->api
-      ->FlushConsoleInputBuffer($this->f0);
-    ###
-    if (!$x)
-    {
-      throw self::error(
-        $this->api, $this->varmem,
-        'FlushConsoleInputBuffer'
-      );
-    }
+    self::con_input_flush($this->f0);
   }
   # }}}
   function finit(): void # {{{
@@ -937,53 +698,42 @@ abstract class Conio_Base extends Conio_PseudoBase
   # }}}
   function close(): void # {{{
   {
-    $this->api->CloseHandle($this->f0);
-    $this->api->CloseHandle($this->f1);
+    Sys::close_handle($this->f0);
+    Sys::close_handle($this->f1);
   }
   # }}}
   # }}}
 }
 trait Conio_BaseA # Async {{{
 {
-  # base {{{
-  public object $writeCallback,$overlapped;
+  # basis {{{
+  public ?object
+    $writeCallback=null,
+    $overlapped=null;
+  ###
   function setConstructed(): void
   {
     parent::setConstructed();
-    ###
-    $this->overlapped = self::malloc(
-      $this->api, 1, 'OVERLAPPED'
+    $this->overlapped = Sys::$API->new(
+      Sys::$OVERLAPPED, false, true
     );
     $this->writeCallback =
       $this->writeCallback(...);
   }
   function finit(): void
   {
-    isset($this->overlapped) &&
-    FFI::free($this->overlapped);
+    if ($this->overlapped)
+    {
+      FFI::free($this->overlapped);
+      $this->overlapped = $this->writeCallback = null;
+    }
   }
   # }}}
   function puts(string $s): void # {{{
   {
-    $o = $this->overlapped;
-    FFI::memset($o, 0, FFI::sizeof($o));
-    $x = $this->api->WriteFileEx(
-      $this->f1, $s,
-      $this->writing = strlen($s), $o,
-      $this->writeCallback
-    );
-    if ($x)
-    {
-      # wait for completion
-      do {Loop::cooldown();}
-      while ($this->writing > 0);
-    }
-    else
-    {
-      throw self::error(
-        $this->api, $this->varmem, 'WriteFileEx'
-      );
-    }
+    $x = Sys::write_file($this->f1, $s, strlen($s));
+    if ($x === 0) {return;}
+    throw self::error('WriteFile', '', $x);
   }
   # }}}
   function write(): void # {{{
@@ -991,9 +741,9 @@ trait Conio_BaseA # Async {{{
     $o = $this->overlapped;
     FFI::memset($o, 0, FFI::sizeof($o));
     $n = $this->writeLen1;
-    $x = $this->api->WriteFileEx(
-      $this->f1, $this->writeBuf1, $n, $o,
-      $this->writeCallback
+    $x = Sys::$API->WriteFileEx(
+      $this->f1, $this->writeBuf1, $n,
+      FFI::addr($o), $this->writeCallback
     );
     if ($x)
     {
@@ -1005,30 +755,23 @@ trait Conio_BaseA # Async {{{
     {
       # failure
       $this->writing = -1;# suspend forever
-      $this->error = self::error(
-        $this->api, $this->varmem, 'WriteFileEx'
-      );
+      $this->error = self::error('WriteFileEx');
     }
   }
   # }}}
-  function writeCallback(# {{{
-    int $e, int $n
-  ):void
+  function writeCallback(int $e, int $n): void # {{{
   {
-    if ($e === 0)
+    if ($e)
     {
-      $this->writing &&
-      $this->setWriteComplete();
+      $this->writing = -1;
+      $this->error = self::error(
+        'WriteFileEx', '', $e
+      );
     }
     else
     {
-      $s = self::strerror(
-        $this->api, $this->varmem, $e
-      );
-      $this->writing = -1;
-      $this->error = ErrorEx::fatal(
-        'kernel32::WriteFileEx', $s
-      );
+      $this->writing &&
+      $this->setWriteComplete();
     }
   }
   # }}}
@@ -1037,15 +780,13 @@ trait Conio_BaseA # Async {{{
     # cancel pending write operation
     if ($this->writing > 0)
     {
-      if ($this->api->CancelIo($this->f1)) {
+      if (Sys::cancel_io($this->f1)) {
         $this->writing = 0;
       }
       else
       {
         $this->writing = -1;
-        $this->error = self::error(
-          $this->api, $this->varmem, 'CancelIo'
-        );
+        $this->error = self::error('CancelIo');
       }
     }
     # clear output buffers

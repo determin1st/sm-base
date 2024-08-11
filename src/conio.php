@@ -513,13 +513,6 @@ class Conio # {{{
     if (self::$GEAR) {
       return null;
     }
-    # check requirements
-    if (!class_exists('FFI'))
-    {
-      return ErrorEx::fail(__CLASS__,
-        'FFI extension is required'
-      );
-    }
     # construct OS-specific instance and
     # the gear of asynchronicity
     try
@@ -701,7 +694,7 @@ class Conio_Gear extends Completable # {{{
         $o->_cancel();
       }
     }
-    $this->base->__destruct();
+    $this->base->deconstruct();
     $this->base = null;
   }
   # }}}
@@ -1285,10 +1278,8 @@ abstract class Conio_PseudoBase # {{{
     $focused=1,$lastFocused=1;
   ###
   protected function __construct(
-    public object  $api,    # FFI library bindings
-    public ?object $varmem, # some malloc'ated memory
-    public int     $f0,     # input descriptor
-    public int     $f1,     # output descriptor
+    public int     $f0,     # input descriptor/handle
+    public int     $f1,     # output descriptor/handle
     public string  $devPath,# terminal device path
     public array   $mode    # initial configuration
   ) {
@@ -1298,10 +1289,10 @@ abstract class Conio_PseudoBase # {{{
     $this->scroll = $mode['scroll'];
     $this->cursor = $mode['cursor'];
   }
-  function __destruct()
+  function deconstruct(): void
   {
     # check already deconstructed
-    if (!$this->varmem) {
+    if (!$this->f0 || !$this->f1) {
       return;
     }
     # deactivate output buffering
@@ -1319,9 +1310,7 @@ abstract class Conio_PseudoBase # {{{
     catch (Throwable) {}
     # close handles/file descriptors
     $this->close();
-    # release allocated memory
-    FFI::free($this->varmem);
-    $this->varmem = null;
+    $this->f0 = $this->f1 = 0;
   }
   function __debugInfo(): array
   {

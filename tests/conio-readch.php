@@ -5,7 +5,12 @@ require_once
   '..'.DIRECTORY_SEPARATOR.
   'autoload.php';
 ###
-Conio::init() && exit();
+if ($e = Conio::init())
+{
+  echo ErrorLog::render($e);
+  exit();
+}
+Conio::set('buffering', false);
 ###
 echo "\n[q] ~ quits";
 echo "\nConio::readch(): ";

@@ -12,7 +12,6 @@ use const
   PHP_BINARY,PHP_OS_FAMILY,PHP_INT_MAX,
   SIGCHLD,SIG_IGN,DIRECTORY_SEPARATOR;
 ###
-require_once __DIR__.DIRECTORY_SEPARATOR.'sysapi.php';
 require_once __DIR__.DIRECTORY_SEPARATOR.'promise.php';
 require_once __DIR__.DIRECTORY_SEPARATOR.'sync.php';
 # }}}

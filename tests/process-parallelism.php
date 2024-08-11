@@ -6,6 +6,10 @@ require_once(
   'autoload.php'
 );
 ###
+#$h = Sys::get_stdin_handle();
+#Sys::read_console_input($h, 1);
+#exit;
+###
 if ($e = Process::init('sm-process-test'))
 {
   echo ErrorLog::render($e);
@@ -13,25 +17,23 @@ if ($e = Process::init('sm-process-test'))
 }
 if (Process::is_master())
 {
-  # MASTER has the console
-  echo "> Conio::init()..\n";
+  ###
   if ($e = Conio::init())
   {
     echo ErrorLog::render($e);
     exit();
   }
   Conio::set('buffering', false);
-  echo "> Conio::init();\n";
   Process::set_handler(master_handler(...));
   master_loop();
 }
 else
 {
-  # SLAVE process/worker operates in silence
+  ###
   Process::set_handler(slave_handler(...));
   await(sleep(2000));
   Process::$BASE->output('hello');
-  await(sleep(30000));
+  await(sleep(10000));
 }
 exit();
 ###
