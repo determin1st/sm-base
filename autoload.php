@@ -22,9 +22,8 @@ define('SM\\AUTO', new class()
   public bool $ready=false;
   function autoload(string $class): void
   {
-    if (isset(self::MAP[$class])) {
-      include self::DIR.self::MAP[$class];
-    }
+    isset(self::MAP[$class]) &&
+    include(self::DIR.self::MAP[$class]);
   }
   function register(): bool
   {

@@ -20,9 +20,9 @@ require_once __DIR__.DIRECTORY_SEPARATOR.(
 # }}}
 class Conio # {{{
 {
-  # TODO: keep base not gear here
-  # TODO: default color management/info api
   # TODO: refine FFI code (string terminators)
+  # TODO: keep base not gear
+  # TODO: default color management/info api
   const # {{{
     # event types {{{
     EV_ERROR  = 0x00,# ErrorEx
@@ -570,7 +570,7 @@ class Conio # {{{
   }
   # }}}
   # setters {{{
-  static function clear(): void {
+  static function clear_output(): void {
     self::$GEAR->base->clearOutput();
   }
   static function set(string $option, int|bool $v): void

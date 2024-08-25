@@ -1,7 +1,7 @@
 @echo off
 set FILE="speed.php"
-goto ALL
-::goto ONLY
+::goto ALL
+::goto SELF
 
 :TOP
 php -f %FILE% 2 %1
@@ -15,18 +15,15 @@ node speed.js 6 %1
 node speed.js 4 %1
 goto END
 
-:ONLY
-::php -f %FILE% 1 %1
+:SELF
+php -f %FILE% 1 %1
 php -f %FILE% 2 %1
-::php -f %FILE% 3 %1
-php -f %FILE% 4 %1
+php -f %FILE% 3 %1
 goto END
 
 :ALL
 :: mustache
 php -f %FILE% 0 %1
-:: sm-mustache-old
-::php -f %FILE% 4 %1
 :: sm-mustache (+preset)
 php -f %FILE% 1 %1
 php -f %FILE% 2 %1

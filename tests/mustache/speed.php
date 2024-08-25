@@ -1,10 +1,19 @@
 <?php declare(strict_types=1);
 # prepare {{{
-require_once(__DIR__.DIRECTORY_SEPARATOR.'help.php');
-$test = isset($argv[1])
+require_once(
+  __DIR__.DIRECTORY_SEPARATOR.
+  '..'.DIRECTORY_SEPARATOR.
+  '..'.DIRECTORY_SEPARATOR.
+  'autoload.php'
+);
+require_once(
+  __DIR__.DIRECTORY_SEPARATOR.
+  'help.php'
+);
+$test = isset($_SERVER['argv'][1])
   ? intval($argv[1])
   : 1;
-$count = isset($argv[2])
+$count = isset($_SERVER['argv'][2])
   ? intval($argv[2])
   : 1;
 ###
@@ -19,12 +28,6 @@ $pad = "\t\t\t";
 $t = hrtime(true);
 switch ($test) {
 case 1:# {{{
-  require_once(
-    __DIR__.DIRECTORY_SEPARATOR.
-    '..'.DIRECTORY_SEPARATOR.
-    '..'.DIRECTORY_SEPARATOR.
-    'mustache.php'
-  );
   $m = \SM\Mustache::new([
     'escape'=>true,
     'unescape'=>true,
@@ -36,12 +39,6 @@ case 1:# {{{
   break;
   # }}}
 case 2:# {{{
-  require_once(
-    __DIR__.DIRECTORY_SEPARATOR.
-    '..'.DIRECTORY_SEPARATOR.
-    '..'.DIRECTORY_SEPARATOR.
-    'mustache.php'
-  );
   $m = \SM\Mustache::new([
     'escape'=>true,
     'unescape'=>true,
@@ -53,12 +50,6 @@ case 2:# {{{
   break;
   # }}}
 case 3:# {{{
-  require_once(
-    __DIR__.DIRECTORY_SEPARATOR.
-    '..'.DIRECTORY_SEPARATOR.
-    '..'.DIRECTORY_SEPARATOR.
-    'mustache.php'
-  );
   $m = \SM\Mustache::new([
     'escape'=>true,
     'unescape'=>true,
@@ -67,28 +58,6 @@ case 3:# {{{
   $i = 'sm-mustache';
   $fun = 'set()+get()';
   if ($count > 9) {$pad = "\t\t";}
-  break;
-  # }}}
-case 4:# old {{{
-  require_once(
-    __DIR__.DIRECTORY_SEPARATOR.
-    '..'.DIRECTORY_SEPARATOR.
-    '..'.DIRECTORY_SEPARATOR.
-    '__junk'.DIRECTORY_SEPARATOR.
-    'mustache.php'
-  );
-  $m = \SM\Mustache::new([
-    'escape'=>true,
-    'unescape'=>true,
-    'dedent'=>1,
-  ]);
-  #$m = \SM\Mustache::new(['escape'=>true]);
-  #$m = \SM\Mustache::construct([
-  #  'escaper' => true
-  #]);
-  $i = 'sm-mustache-old';
-  $fun = 'render()';
-  $pad = "\t\t";
   break;
   # }}}
 default:# {{{

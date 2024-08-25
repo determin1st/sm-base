@@ -237,6 +237,7 @@ columns remove the burden of managing effects.
 <!-- links {{{ -->
 
 [history]: https://samsaccone.com/posts/history-of-promises.html
+[asyncio]: https://web.archive.org/web/20240615233531/https://neopythonic.blogspot.com/2022/10/reasoning-about-asynciosemaphore.html
 
 <!-- }}} -->
 

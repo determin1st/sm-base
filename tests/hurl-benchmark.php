@@ -317,7 +317,7 @@ while ($ch = show_menu())
   case 'l':# {{{
     $hostIdx = $hostIdx ? 0 : 1;
     $HURL->url($hosts[$hostIdx])->save();
-    \SM\Conio::clear();
+    \SM\Conio::clear_output();
     continue 2;
   # }}}
   case 'n':# {{{

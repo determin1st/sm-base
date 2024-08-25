@@ -3,8 +3,9 @@
 namespace SM;
 use FFI,Throwable;
 use function
-  class_exists,function_exists,is_resource,
-  json_encode,json_decode,fread,fclose,dechex,
+  class_exists,function_exists,is_resource,is_object,
+  is_string,substr,json_encode,json_decode,
+  fread,fclose,dechex,count,
   proc_open,proc_get_status,proc_terminate,
   pcntl_signal,pcntl_fork,pcntl_exec,pcntl_waitpid,
   posix_kill,ob_start,ob_end_flush;
@@ -12,155 +13,68 @@ use const
   PHP_BINARY,PHP_OS_FAMILY,PHP_INT_MAX,
   SIGCHLD,SIG_IGN,DIRECTORY_SEPARATOR;
 ###
-require_once __DIR__.DIRECTORY_SEPARATOR.'promise.php';
 require_once __DIR__.DIRECTORY_SEPARATOR.'sync.php';
 # }}}
 class Process # {{{
 {
-  # TODO: (opt-out) output buffering in the slave
+  # TODO: stop/start hundreds of processes
   # TODO: test/increase startup timeouts
-  # TODO: resolve master vs slave-master conflict
-  # TODO: start multiple processes
+  # TODO: slamaster
+  # TODO: created or attached? (prop)
   # initializer {{{
-  static string  $GID='';
-  static ?object $BASE=null,$API=null;
+  static ?object $BASE=null;
   private function __construct()
   {}
-  static function init(string $gid): ?object {
-    return self::_init($gid, 0, null);
-  }
-  static function init_master(string $gid, ?object $fn=null): ?object {
-    return self::_init($gid, 1, $fn);
-  }
-  static function init_slave(string $gid, ?object $fn=null): ?object {
-    return self::_init($gid, 2, $fn);
-  }
-  static function _init(
-    string $gid, int $type, ?object $fn
-  ):?object
+  static function init(array $o): ?object
   {
-    # check already initialized
     if (self::$BASE)
     {
-      throw ErrorEx::fatal(
+      return ErrorEx::fail(
         __CLASS__, 'already initialized'
       );
     }
-    # check requirements
-    if (!class_exists('SyncSharedMemory', false))
-    {
-      return ErrorEx::fail(__CLASS__,
-        'Sync extension is required'
-      );
-    }
-    if (PHP_OS_FAMILY === 'Windows')
-    {
-    }
-    else
-    {
-      # check few extensions
-      if (!function_exists('pcntl_waitpid'))
-      {
-        return ErrorEx::fail(__CLASS__,
-          'PCNTL extension is required'
-        );
-      }
-      if (!function_exists('posix_kill'))
-      {
-        return ErrorEx::fail(__CLASS__,
-          'POSIX extension is required'
-        );
-      }
-      # handle SIGCHLD (child termination):
-      # this signal is unreliable --
-      # it is not triggered on my system;
-      # there is point in wiring its handler
-      # with the spawn's state;
-      pcntl_signal(SIGCHLD, SIG_IGN);
-    }
-    # construct
     try
     {
-      # set group identifier
-      self::$GID = $gid;
-      # create identifier instance
-      $o = new SyncNum($gid);
-      $i = $o->get();
-      # create base instance
-      switch ($type) {
-      case 0:# autodetect
-        if ($i)
-        {
-          $o = self::new_status(Fx::$PROCESS_ID);
-          $O = new Process_Slave($fn, $o, $i);
-        }
-        else {
-          $O = new Process_Master($fn, $o);
-        }
-        break;
-      case 1:# master
-        if ($i)
-        {
-          throw ErrorEx::fail(__CLASS__,
-            'master is already running'
-          );
-        }
-        $O = new Process_Master($fn, $o);
-        break;
-      case 2:# slave
-        if (!$i)
-        {
-          throw ErrorEx::fail(__CLASS__,
-            'master is not running'
-          );
-        }
-        $o = self::new_status(Fx::$PROCESS_ID);
-        $O = new Process_Slave($fn, $o, $i);
-        break;
-      }
-      self::$BASE = $O;
-      $e = null;
+      self::$BASE = Process_Base::construct($o);
+      return null;
     }
-    catch (Throwable $e) {
-      $e = ErrorEx::from($e);
+    catch (Throwable $e)
+    {
+      return ErrorEx::chain(
+        ErrorEx::fail(__CLASS__), $e
+      );
     }
-    return $e;
   }
   # }}}
-  # factory stasis {{{
-  static function new_status(string $pid): object {
-    return new SyncNum(self::$GID.'-'.$pid);
-  }
-  static function new_exchange(string $pid): object
-  {
-    return SyncExchange::new([
-      'id'    => self::$GID.'-'.$pid.'-cmd',
-      'size'  => 500
-    ]);
-  }
-  static function new_aggregate(string $pid): object
-  {
-    return SyncAggregate::new([
-      'id'    => self::$GID.'-'.$pid.'-evt',
-      'size'  => 1000
-    ]);
-  }
-  # }}}
-  # api stasis {{{
+  # stasis {{{
   static function is_master(): bool {
     return self::$BASE->isMaster;
   }
-  static function config(): ?array {
+  static function set_handler(object $f): void {
+    self::$BASE->handlerSet($f);
+  }
+  static function get_config(): ?array {
     return self::$BASE->config;
   }
-  static function set_handler(object $f): void {
-    self::$BASE->handler = $f;
-  }
-  static function start(string $file, array $cfg=[]): object {
+  static function start(
+    string $file, array $cfg=[]
+  ):object
+  {
     return self::$BASE->start($file, $cfg);
+  }
+  static function start_group(
+    string $file, int $count, array $cfg=[]
+  ):object
+  {
+    return ($count < 2)
+      ? self::$BASE->start($file, $cfg)
+      : self::$BASE->startGroup($file, $count, $cfg);
   }
   static function stop(string $pid): object {
     return self::$BASE->stop($pid);
+  }
+  static function stop_group(array $pids): object {
+    return self::$BASE->stopGroup($pids);
   }
   static function stop_all(): object {
     return self::$BASE->stopAll();
@@ -168,60 +82,277 @@ class Process # {{{
   static function count(): int {
     return self::$BASE->spawnCount;
   }
-  static function list(): array
-  {
-    $a = [];
-    foreach (self::$BASE->spawn as $o) {
-      $a[] = $o->pid;
-    }
-    return $a;
+  static function list(): array {
+    return self::$BASE->spawnGetPids();
   }
   # }}}
 }
 # }}}
-class Process_Master # {{{
+### BASE
+abstract class Process_Base # {{{
 {
   # basis {{{
-  const REVIVE_TIME=1000*1000000;# ms ~ ns
   public bool    $isMaster=true;
-  public array   $spawnWard=[],$spawn=[],$event=[];
-  public int     $spawnWardCount=0,$spawnCount=0;
-  public int     $eventCount=0;
-  public ?object $dispatcher;
   public ?array  $config=null;
+  public ?object $status,$dispatcher;
   function __construct(
     public ?object $handler,
-    public ?object $gid
+    public bool    $autonomy,
+    public string  $g0name,
+    public ?object $g0so,
+    public int     $g0id,
+    public string  $g1name=''
   ) {
-    $gid->set((int)Fx::$PROCESS_ID);
+    $this->init();
+    $this->status = $status =
+      $this->newStatus(Fx::$PROCESS_ID);
+    ###
+    $status->set(1);
     $this->dispatcher = Loop::gear(
       new Process_Dispatcher($this)
     );
-    $this->dispatcher->init();
   }
   # }}}
-  # util {{{
-  function eventReader(): object # {{{
+  static function construct(array $o): object # {{{
   {
-    return ErrorEx::peep(
-      Process::new_aggregate(Fx::$PROCESS_ID)
-    )
-    ->read()
-    ->okay(function(object $r): ?object {
-      # handle events
-      $n = 0;
-      foreach ($r->value as $s) {
-        $n += $this->eventHandle(json_decode($s, true));
+    # parse options (TODO:more checks)
+    # {{{
+    if (!isset($o[$k = 'group']))
+    {
+      throw ErrorEx::fail(
+        'option "'.$k.'" is required'
+      );
+    }
+    if (!is_string($o[$k]))
+    {
+      throw ErrorEx::fail(
+        'option "'.$k.'" is not a string'
+      );
+    }
+    $g0name = $o[$k];
+    $g1name = '';
+    if (isset($o[$k = 'role']))
+    {
+      if (!is_string($o[$k]))
+      {
+        throw ErrorEx::fail(
+          'option "'.$k.'" is not a string'
+        );
       }
-      # activate dispatcher
-      if ($n && !$this->spawnWardCount) {
-        $this->dispatcher->wakeup();
+      switch ($s = $o[$k]) {
+      case 'auto':
+        $role = 0;
+        break;
+      case 'master':
+        $role = 1;
+        break;
+      case 'slave':
+        $role = 2;
+        break;
+      default:
+        $role = 3;
+        if (substr($s, 0, 7) !== 'master:')
+        {
+          throw ErrorEx::fail(
+            'option "'.$k.'" is incorrect'
+          );
+        }
+        $g1name = substr($s, 7);
+        break;
       }
-      # resume reading
-      return $r->reset();
-    });
+    }
+    else {
+      $role = 0;# auto
+    }
+    $autonomy = (
+      isset($o[$k = 'autonomy']) && !!$o[$k]
+    );
+    if (isset($o[$k = 'handler']))
+    {
+      if (!is_object($o[$k]))
+      {
+        throw ErrorEx::fail(
+          'option "'.$k.'" is not an object'
+        );
+      }
+      $hand = $o[$k];
+    }
+    else {
+      $hand = null;
+    }
+    # }}}
+    # check requirements
+    # {{{
+    if (!class_exists('SyncSharedMemory', false))
+    {
+      throw ErrorEx::fail(
+        'Sync','required extension'
+      );
+    }
+    if (PHP_OS_FAMILY !== 'Windows')
+    {
+      if (!function_exists('pcntl_waitpid'))
+      {
+        return ErrorEx::fail(
+          'PCNTL','required extension'
+        );
+      }
+      if (!function_exists('posix_kill'))
+      {
+        return ErrorEx::fail(
+          'POSIX','required extension'
+        );
+      }
+      # handle SIGCHLD (child termination):
+      # this signal is unreliable --
+      # it is not triggered on my system;
+      # there is no point in handler, but
+      # some systems take care of zombies when
+      # this signal is explicitly ignored
+      pcntl_signal(SIGCHLD, SIG_IGN);
+    }
+    # }}}
+    # create mastergroup status object and
+    # get status number (master process id)
+    $g0so = new SyncNum($g0name);
+    $g0id = $g0so->get();
+    # autoselect role
+    $role || $role = $g0id ? 2 : 1;
+    # create base instance
+    return match ($role) {
+      1 => new Process_Master(
+        $hand,$autonomy, $g0name,$g0so,$g0id
+      ),
+      2 => new Process_Slave(
+        $hand,$autonomy, $g0name,$g0so,$g0id
+      ),
+      3 => new Process_Slamaster(
+        $hand,$autonomy, $g0name,$g0so,$g0id, $g1name
+      ),
+    };
   }
   # }}}
+  function deconstructF1(object $r): void # {{{
+  {
+    if ($this->dispatcher)
+    {
+      $this->dispatcher->cancel();
+      $this->status->tryReset();
+      $this->dispatcher = $this->status = null;
+      $r->promiseNoDelay();
+    }
+    else {
+      $r->promiseCancel();
+    }
+  }
+  # }}}
+  function newStatus(string $pid): object # {{{
+  {
+    return new SyncNum($this->g0name.'-'.$pid);
+  }
+  # }}}
+  function newEventChan(string $pid): object # {{{
+  {
+    return ErrorEx::peep(SyncAggregate::new([
+      'id'    => $this->g0name.'-'.$pid.'-evt',
+      'size'  => 1000
+    ]));
+  }
+  # }}}
+  function newCmdChan(string $pid): object # {{{
+  {
+    return SyncExchange::new([
+      'id'    => $this->g0name.'-'.$pid.'-cmd',
+      'size'  => 500
+    ]);
+  }
+  # }}}
+  abstract function init(): void;
+  abstract function deconstruct(): object;
+}
+# }}}
+trait Process_MasterTrait # {{{
+{
+  # props {{{
+  public array
+    $event=[],$spawn=[],
+    $spawnWard=[];
+  public int
+    $eventCount=0,$spawnCount=0,
+    $spawnWardCount=0;
+  public ?object
+    $spawnChecker=null,$eventReader=null;
+  ###
+  # }}}
+  # components {{{
+  function eventReader(bool $set=true): self # {{{
+  {
+    $o = &$this->eventReader;
+    if ($set && !$o)
+    {
+      $o = Loop::attach(
+        $this->newEventChan(Fx::$PROCESS_ID)
+        ->read()
+        ->okay($this->eventReaderFn(...))
+      );
+    }
+    elseif (!$set && $o)
+    {
+      $o->cancel();
+      $o = null;
+    }
+    return $this;
+  }
+  function eventReaderFn(object $r): ?object
+  {
+    # handle events
+    $n = 0;
+    foreach ($r->value as $s) {
+      $n += $this->eventHandle(json_decode($s, true));
+    }
+    # activate dispatcher
+    if ($n && !$this->spawnWardCount) {
+      $this->dispatcher->wakeup();
+    }
+    # resume reading
+    return $r->reset();
+  }
+  # }}}
+  function spawnChecker(bool $set=true): self # {{{
+  {
+    $o = &$this->spawnChecker;
+    if ($set && !$o)
+    {
+      $o = Loop::attach(Promise
+        ::Func($this->spawnCheckerFn(...))
+        ->halt()
+      );
+    }
+    elseif (!$set && $o)
+    {
+      $o->cancel();
+      $o = null;
+    }
+    return $this;
+  }
+  function spawnCheckerFn(object $r): ?object
+  {
+    foreach ($this->spawn as $o)
+    {
+      if ($rx = $o->check())
+      {
+        # non-empty check is a result of termination,
+        # remove the spawn and generate a stop event
+        unset($this->spawn[$o->pid]);
+        $this->spawnCount--;
+        $this->eventAdd(['stop', $o->pid, $rx]);
+      }
+    }
+    return $r->promiseIdle();
+  }
+  # }}}
+  # }}}
+  # hlp {{{
   function eventHandle(array $a): int # {{{
   {
     $pid = $a[1];
@@ -238,7 +369,7 @@ class Process_Master # {{{
         break;
       }
       # offload attachment
-      Loop::attach($this->attach($pid));
+      Loop::attach($this->startAttach($pid));
       break;
     default:
       # accumulate events
@@ -261,45 +392,29 @@ class Process_Master # {{{
     $this->dispatcher->wakeup();
   }
   # }}}
-  function spawnChecker(): object # {{{
+  function spawnCreate(# {{{
+    string $file, int $count, array $cfg
+  ):object
   {
-    return Promise
-    ::Func(function(object $r): ?object {
-      # checkout current count
-      if ($this->spawnCount === 0) {
-        return $r->promiseIdle();
-      }
-      # generate stop events
-      foreach ($this->spawn as $o)
-      {
-        if ($rx = $o->check())
-        {
-          unset($this->spawn[$o->pid]);
-          $this->spawnCount--;
-          $this->eventAdd(['stop', $o->pid, $rx]);
-        }
-      }
-      # take a nap
-      return $r->promiseIdle();
-    });
-  }
-  # }}}
-  function spawnCreate(string $file, array $cfg): object # {{{
-  {
-    # initialize dispatcher
-    if (!$this->dispatcher)
-    {
-      return Promise
-      ::Error(ErrorEx::fail('no dispatcher'));
-    }
-    $this->dispatcher->isReady ||
-    $this->dispatcher->init();
     # extend configuration with defaults
     if (!isset($cfg['output'])) {
       $cfg['output'] = true;
     }
-    # construct completable
-    return new Process_Spawn($this, $file, $cfg);
+    # construct one
+    if ($count < 2)
+    {
+      return new Promise(new Process_Spawn(
+        $this, $file, $cfg
+      ));
+    }
+    # construct many
+    for ($a=[],$i=0; $i < $count; ++$i)
+    {
+      $a[$i] = new Promise(new Process_Spawn(
+        $this, $file, $cfg
+      ));
+    }
+    return Promise::Row($a, 1);
   }
   # }}}
   function spawnWardAdd(object $spawn): void # {{{
@@ -339,38 +454,81 @@ class Process_Master # {{{
     return $spawn;
   }
   # }}}
+  function spawnGetPids(): array # {{{
+  {
+    $pids = [];
+    foreach ($this->spawn as $o) {
+      $pids[] = $o->pid;
+    }
+    return $pids;
+  }
+  # }}}
+  function handlerSet(object $f): void # {{{
+  {
+    $this->handler = $f;
+  }
+  # }}}
+  # }}}
   function dispatch(): void # {{{
   {
     ($this->handler)($this->event);
     $this->event = [];
+    $this->eventCount = 0;
   }
   # }}}
-  # }}}
-  # start/attach {{{
-  function start(string $file, array $cfg): object
+  function start(string $file, array $cfg): object # {{{
   {
-    return Promise
-    ::from($this->spawnCreate($file, $cfg))
+    return $this
+    ->spawnCreate($file, 1, $cfg)
     ->then($this->startFn(...));
   }
   function startFn(object $r): void {
     $r->confirm(__CLASS__, 'start');
   }
-  function attach(string $pid): object
+  # }}}
+  function startGroup(# {{{
+    string $file, int $count, array $cfg
+  ):object
   {
-    $cfg = ['pid' => $pid];
-    return Promise
-    ::from($this->spawnCreate('', $cfg))
-    ->then($this->attachFn(...));
+    return $this
+    ->spawnCreate($file, $count, $cfg)
+    ->then($this->startGroupFn(...));
   }
-  function attachFn(object $r): void
+  function startGroupFn(object $r): ?object
+  {
+    # startup phase complete
+    $r->confirm(__CLASS__, 'startGroup');
+    # check successful
+    if ($r->ok) {
+      return null;
+    }
+    # check no tracks (nonthing started)
+    if (!($tracks = $r->rowTracks())) {
+      return null;
+    }
+    # when one of the spawns fails to start
+    # all or nothing rule applies -
+    # stop others that started
+    $a = [];
+    foreach ($tracks as $i => $t) {
+      $t->ok && $a[] = $r->value[$i];
+    }
+    return $this->stopGroup($a);
+  }
+  # }}}
+  function startAttach(string $pid): object # {{{
+  {
+    return $this
+    ->spawnCreate('', 1, ['pid'=>$pid])
+    ->then($this->startAttachFn(...));
+  }
+  function startAttachFn(object $r): void
   {
     $r->confirm(__CLASS__, 'attach');
     $this->eventAdd(['attach', $r->value, $r]);
   }
   # }}}
-  # stop {{{
-  function stop(string $pid): object
+  function stop(string $pid): object # {{{
   {
     return Promise
     ::Func($this->stopF1(...), $pid)
@@ -393,50 +551,57 @@ class Process_Master # {{{
     $this->spawnWardRem($pid);
     $r->confirm(__CLASS__, $pid, 'stop');
   }
-  function stopAll(): object
+  # }}}
+  function stopGroup(array $pids): object # {{{
   {
     return Promise
-    ::Func($this->stopAllF1(...))
-    ->then($this->stopAllFn(...));
+    ::Func($this->stopGroupF1(...), $pids)
+    ->then($this->stopGroupFn(...), $pids);
   }
-  function stopAllF1(object $r): ?object
+  function stopAll(): object {
+    return $this->stopGroup($this->spawnGetPids());
+  }
+  function stopGroupF1(object $r, array $pids): ?object
   {
-    # check
-    if (!$this->spawnCount)
+    # immediate pass
+    $r->promiseNoDelay();
+    # construct individual stops
+    $a = [];
+    foreach ($pids as $pid)
+    {
+      isset($this->spawn[$pid]) &&
+      $a[] = $this->stop($pid);
+    }
+    # check there is nothing
+    if (!$a)
     {
       $r->warn('no processes to stop');
       return null;
     }
-    # construct promises
-    $a = [];
-    foreach ($this->spawn as $o) {
-      $a[] = $this->stop($o->pid);
-    }
-    # assemble the row
+    # proceed in the row
     return Promise::Row($a);
   }
-  function stopAllFn(object $r): void {
-    $r->confirm(__CLASS__, 'stopAll');
+  function stopGroupFn(object $r, array $pids): void
+  {
+    foreach ($pids as $pid) {
+      $this->spawnWardRem($pid);
+    }
+    $r->confirm(__CLASS__, 'stopGroup');
   }
   # }}}
-  # deconstruct {{{
-  function deconstruct(): object
+  function deconstruct(): object # {{{
   {
     return Promise
     ::Func($this->deconstructF1(...))
+    ->then($this->deconstructF2(...))
     ->then($this->deconstructFn(...));
   }
-  function deconstructF1(object $r): ?object
+  function deconstructF2(object $r): ?object
   {
-    # check already deconstructed
-    if (!$this->dispatcher)
-    {
-      $r->promiseCancel();
-      return null;
-    }
-    # stop dispatcher
-    $this->dispatcher =
-    $this->dispatcher->finit();
+    # stop components
+    $this
+      ->spawnChecker(false)
+      ->eventReader(false);
     # stop slaves
     $r->promiseNoDelay();
     return $this->spawnCount
@@ -445,109 +610,176 @@ class Process_Master # {{{
   }
   function deconstructFn(object $r): void
   {
-    # clear group identifier
-    $this->gid->tryReset();
-    $this->gid = null;
+    # leave group
+    $this->g0so->tryReset();
+    $this->g0so = null;
   }
   # }}}
 }
 # }}}
-class Process_Slave extends Process_Master # {{{
+trait Process_SlaveTrait # {{{
 {
-  # basis {{{
-  public bool $isMaster=false,$buffering=false;
-  public ?object $status,$eventChan,$eventQueue=null;
-  function __construct(
-    public ?object $handler,
-    public ?object $gid,
-    public int     $gidNum
-  ) {
-    # create and set own status
-    $pid = Fx::$PROCESS_ID;
-    $this->status = Process::new_status($pid);
-    $this->status->set(1);
-    # create event channel
-    $this->eventChan = $event = ErrorEx::peep(
-      Process::new_aggregate((string)$gidNum)
-    );
-    # create and offload dispatcher
-    $this->dispatcher = Loop::gear(
-      new Process_Dispatcher($this)
-    );
-    # offload activator
-    $deconstruct = $this->deconstruct();
-    Loop::attach(
-      Promise::Func(function(object $r): void {
-        # handler must be installed asap
-        $this->handler || $r->fail('no handler');
-      })
-      ->failFuse($event
-        ->write(json_encode(['start', $pid, 1]))
-        ->then($deconstruct)
-      )
-      ->then($event
-        ->write(json_encode(['start', $pid, 0]))
-      )
-      ->okay($this->activate(...))
-      ->then($deconstruct)
-    );
+  # props {{{
+  public bool
+    $buffering=false;
+  public ?object
+    $groupChecker=null,
+    $eventWriter=null,$eventQueue=null;
+  ###
+  # }}}
+  # components {{{
+  function eventQueue(bool $set=true): self # {{{
+  {
+    $o = &$this->eventQueue;
+    if ($set && !$o)
+    {
+      $o = Loop::Queue();
+      $this->eventWriter = $this->newEventChan(
+        (string)$this->g0id
+      );
+    }
+    elseif (!$set && $o)
+    {
+      $o->cancel();
+      $o = $this->eventWriter = null;
+    }
+    return $this;
   }
   # }}}
-  function activate(object $r): ?object # {{{
+  function buffering(bool $set=true): self # {{{
   {
-    # create command channel
-    $chan = Process::new_exchange(
-      Fx::$PROCESS_ID
-    );
-    if (ErrorEx::is($chan))
+    $o = &$this->buffering;
+    if ($set && !$o)
     {
-      $r->error($chan);
+      # select and create output handler
+      $f = $this->config['output']
+        ? $this->output(...)
+        : self::output_zap(...);
+      # activate output buffering
+      $o = !!ob_start($f, 1);
+    }
+    elseif (!$set && $o)
+    {
+      $o = false;
+      ob_end_flush();
+    }
+    return $this;
+  }
+  # }}}
+  function groupChecker(bool $set=true): self # {{{
+  {
+    $o = &$this->groupChecker;
+    if ($set && !$o)
+    {
+      $o = Loop::attach(Promise
+        ::Func($this->groupCheckerFn(...))
+      );
+    }
+    elseif (!$set && $o)
+    {
+      $o->cancel();
+      $o = null;
+    }
+    return $this;
+  }
+  function groupCheckerFn(object $r): ?object
+  {
+    # check group is still unmanaged
+    if (!($id = $this->g0so->get())) {
+      return $r->promiseIdle();
+    }
+    # complete and offload attachment
+    $this->g0id = $id;
+    return $this->attach();
+  }
+  # }}}
+  # }}}
+  function attach(bool $init=false): void # {{{
+  {
+    Loop::attach(Promise::Func($init
+      ? $this->attachF1(...)
+      : $this->attachF2(...)
+    ));
+  }
+  function attachF1(object $r): ?object
+  {
+    if (!$this->handler)
+    {
+      $r->fail('process handler is not installed');
+      return $this->deconstruct();
+    }
+    if (!$this->g0id)
+    {
+      $this->groupChecker();
       return null;
     }
-    # continue
-    return Promise
-    ::Row([
-      # receive configuration
-      $chan->server()
-      ->okay(function(object $r): ?object
-      {
-        return $r->index
-          ? $r->hangup()
-          : $r->write('ok');
-      }),
-      # set the timeout
-      Promise::Delay(500)
-    ], 1, 1)
-    ->okay(function(object $r): void
+    $r->promiseNoDelay();
+    return $this->attachF2(...);
+  }
+  function attachF2(object $r): ?object
+  {
+    # TODO: determine timeout from status
+    $timeout = 500;
+    $pid = Fx::$PROCESS_ID;
+    $cmd = $this->newCmdChan($pid);
+    if (ErrorEx::is($cmd))
     {
-      # check failed
-      if (!$r->ok)
-      {
-        $r->fail('activation failed');
-        return;
-      }
-      if ($r->index)
-      {
-        $r->fail('activation timed out (500ms)');
-        return;
-      }
-      # set configuration
-      $this->config = $cfg = json_decode(
-        $r->value[0], true
-      );
-      # create event queue
-      $this->eventQueue = Loop::queue();
-      # select and create output handler
-      $f = $cfg['output']
-        ? $this->output(...)
-        : (static function():string {return '';});
-      # activate output buffering
-      #$this->buffering = !!ob_start($f, 1);
-    })
-    ->okay(
-      $chan->server()
-      ->okay($this->serve(...))
+      $r->error($cmd);
+      return $this->deconstruct();
+    }
+    return $this
+    ->eventQueue()->eventWriter
+    ->write(json_encode(['start', $pid]))
+    ->thenRow([
+      $cmd->server()->okay($this->attachF3(...)),
+      Promise::Delay($timeout)
+    ], 1, 1)
+    ->okay($this->attachF4(...), $timeout)
+    ->okay($cmd->server()->okay($this->serve(...)))
+    ->then($this->detach(...));
+  }
+  function attachF3(object $r): ?object
+  {
+    # set configuration
+    $this->config = json_decode($r->value[0], true);
+    return $r->hangup();
+  }
+  function attachF4(object $r, int $t): void
+  {
+    if ($r->index) {
+      $r->fail('timeout ('.$t.'ms)');
+    }
+    else {# activate output buffering
+      $this->buffering();
+    }
+    $r->promiseNoDelay();
+  }
+  # }}}
+  function detach(object $r): ?object # {{{
+  {
+    if (!$r->ok || !$this->autonomy) {
+      return $this->deconstruct();
+    }
+    $this->g0id = 0;
+    $this->eventQueue(false);
+    $this->groupChecker();
+    return null;
+  }
+  # }}}
+  function handlerSet(object $f): void # {{{
+  {
+    $firstTime = !$this->handler;
+    $this->handler = $f;
+    $firstTime && Loop::await(
+      Promise::Func($this->handlerSetFn(...))
     );
+  }
+  function handlerSetFn(object $r): ?object
+  {
+    # wait relaxed until process recieves configuration
+    return !$this->config
+      ? $r->promiseIdle()
+      : null;
   }
   # }}}
   function output(string $s): string # {{{
@@ -567,6 +799,9 @@ class Process_Slave extends Process_Master # {{{
     # output nothing
     return '';
   }
+  static function output_zap(): string {
+    return '';
+  }
   # }}}
   function serve(object $r): ?object # {{{
   {
@@ -583,18 +818,25 @@ class Process_Slave extends Process_Master # {{{
     return $r->reset();
   }
   # }}}
-  function deconstructFn(object $r): void # {{{
+  function deconstruct(): object # {{{
   {
-    # finalize
-    if ($this->buffering)
-    {
-      $this->buffering = false;
-      ob_end_flush();
-    }
-    $this->status->tryReset();
-    $this->status = $this->eventChan = null;
-    $this->eventQueue && $this->eventQueue->cancel();
-    $this->eventQueue = null;
+    return Promise
+    ::Func($this->deconstructF1(...))
+    ->then($this->deconstructF3(...))
+    ->then($this->deconstructFn(...));
+  }
+  function deconstructF3(object $r): ?object
+  {
+    # stop components
+    $this
+      ->groupChecker(false)
+      ->buffering(false)
+      ->eventQueue(false);
+    ###
+    return $r->promiseNoDelay();
+  }
+  function deconstructFn(object $r): void
+  {
     # dump error
     if (!$r->ok) {echo ErrorLog::render($r);}
     # terminate
@@ -603,6 +845,95 @@ class Process_Slave extends Process_Master # {{{
   # }}}
 }
 # }}}
+class Process_Master extends Process_Base # {{{
+{
+  use Process_MasterTrait;
+  function init(): void
+  {
+    if ($this->g0id)
+    {
+      throw ErrorEx::fail(
+        __CLASS__, $this->g0name,
+        'master role is already occupied'.
+        ' by process id='.$this->g0id
+      );
+    }
+    $this
+      ->eventReader()
+      ->spawnChecker()
+      ->g0so->set((int)Fx::$PROCESS_ID);
+    ###
+  }
+}
+# }}}
+class Process_Slave extends Process_Base # {{{
+{
+  use Process_SlaveTrait;
+  public bool $isMaster=false;
+  function init(): void
+  {
+    if (!$this->autonomy && !$this->g0id)
+    {
+      throw ErrorEx::fail(
+        __CLASS__, $this->g0name,
+        'master is not running'
+      );
+    }
+    $this->attach();
+  }
+}
+# }}}
+class Process_Slamaster extends Process_Slave # {{{
+{
+  use Process_MasterTrait;
+  public ?object $g1so;
+  function init(): void # {{{
+  {
+    if (!$this->autonomy && !$this->g0id)
+    {
+      throw ErrorEx::fail(
+        __CLASS__, $this->g0name,
+        'master is not running'
+      );
+    }
+    $g1so = new SyncNum($this->g1name);
+    if ($g1so->get())
+    {
+      throw ErrorEx::fail(
+        __CLASS__, $this->g1name,
+        'master is already running'
+      );
+    }
+    $g1so->set((int)Fx::$PROCESS_ID);
+    $this->g1so = $g1so;
+    ###
+    $this
+      ->eventReader()
+      ->spawnChecker()
+      ->attach();
+    ###
+  }
+  # }}}
+  function deconstruct(): object # {{{
+  {
+    return Promise
+    ::Func($this->deconstructF1(...))
+    ->then($this->deconstructF2(...))
+    ->then($this->deconstructF3(...))
+    ->then($this->deconstructFn(...));
+  }
+  function deconstructFn(object $r): void
+  {
+    # leave group
+    $this->g1so->tryReset();
+    $this->g1so = null;
+    # invoke slave handler
+    parent::deconstructFn($r);
+  }
+  # }}}
+}
+# }}}
+### HELPERS
 class Process_Spawn extends Reversible # {{{
 {
   const # {{{
@@ -666,7 +997,7 @@ class Process_Spawn extends Reversible # {{{
     if ($this->file === '') {
       return $this->_1_attach();
     }
-    # move to the next stage
+    # go and start new process
     $this->stage++;
     return $this->_complete();
   }
@@ -754,16 +1085,16 @@ class Process_Spawn extends Reversible # {{{
   function _3_init(): bool # {{{
   {
     # create communication channel
-    $pid = $this->pid;
-    $chan = Process::new_exchange($pid);
+    $pid  = $this->pid;
+    $chan = $this->base->newCmdChan($pid);
     if (ErrorEx::is($chan))
     {
       $this->result->error($chan);
       return $this->_terminate()->_cleanup();
     }
     # initialize and move to the next stage
-    $this->status = Process::new_status($pid);
-    $this->chan = $chan;
+    $this->status = $this->base->newStatus($pid);
+    $this->chan   = $chan;
     if ($this->file === '')
     {
       $this->time = 0;
@@ -843,6 +1174,7 @@ class Process_Spawn extends Reversible # {{{
       $this->_pipeClose();
     case 2:
     case 1:
+      $r = $this->result;
       $this->result->confirm(
         __CLASS__, 'stage='.$this->stage
       );
@@ -855,24 +1187,20 @@ class Process_Spawn extends Reversible # {{{
   # hlp {{{
   function _configure(): object # {{{
   {
-    return $this->chan
-    ->client()
-    ->okay(function(object $r): ?object
+    return $this
+      ->chan->client()
+      ->okay($this->_configureFn(...));
+  }
+  function _configureFn(object $r): ?object
+  {
+    # send configuration
+    if ($r->index === 0)
     {
-      switch ($r->index) {
-      case 0:# send configuration right away
-        return $r->write(
-          json_encode($this->config), 300
-        );
-      case 1:# read the response
-        return $r->read();
-      }
-      # complete
-      if ($r->value !== 'ok') {
-        $r->fail('configure', $r->value);
-      }
-      return $r->hangup();
-    });
+      return $r->write(
+        json_encode($this->config), 300
+      );
+    }
+    return $r->hangup();
   }
   # }}}
   function _pipeClose(): void # {{{
@@ -1002,7 +1330,9 @@ class Process_Spawn extends Reversible # {{{
     $this->_pipeClose();
     $this->_cleanup();
     # complete
-    return $r->confirm(__CLASS__, 'check');
+    return $r->confirm(
+      __CLASS__, $this->pid, 'check'
+    );
   }
   # }}}
   function stop(): object # {{{
@@ -1054,80 +1384,31 @@ class Process_Spawn extends Reversible # {{{
 # }}}
 class Process_Dispatcher extends Completable # {{{
 {
-  # basis {{{
-  public ?object $isReady=null;
   function __construct(
     public ?object $base
   ) {}
-  # }}}
-  function _complete(): bool # {{{
+  function _complete(): bool
   {
-    # TODO: refine
-    if ($this->isReady)
-    {
-      $this->base->dispatch();
-      $this->result->promiseHalt();
-      return false;
-    }
-    if (!$this->base->spawnCount)
-    {
-      $this->result->promiseHalt();
-      return false;
-    }
-    if ($N < 1)
-    {
-      $N++;
-      $this->init();
-      return false;
-    }
+    # invoke handler
     $this->base->dispatch();
-    $this->_cancel();
-    return true;
+    $this->result->promiseHalt();
+    return false;
   }
-  # }}}
-  function _cancel(): void # {{{
+  function _cancel(): void
   {
-    # clear ready
-    if ($this->isReady)
-    {
-      $this->isReady->cancel();
-      $this->isReady = null;
-    }
     # offload deconstruction
-    Loop::attach($this->base->deconstruct());
-    $this->base = $this->result = null;
+    if ($this->base)
+    {
+      Loop::attach($this->base->deconstruct());
+      $this->base = $this->result = null;
+    }
   }
-  # }}}
-  function init(): void # {{{
-  {
-    # offload event reader and spawn checker
-    Loop::attach(
-      $this->isReady = Promise::Row([
-        $this->base->eventReader(),
-        $this->base->spawnChecker(),
-      ], 1)
-      ->then(function(object $r): void {
-        # this handler executes only
-        # upon failure in the worker
-        $r->confirm(__CLASS__);
-        # add error
-        $this->base->eventAdd(['error', '', $r]);
-        $this->result->promiseWakeup();
-        $this->isReady = null;
-      })
-    );
-  }
-  # }}}
-  function wakeup(): void # {{{
-  {
+  function wakeup(): void {
     $this->result->promiseWakeup();
   }
-  # }}}
-  function finit(): void # {{{
-  {
+  function cancel(): void {
     $this->result && $this->result->promiseCancel();
   }
-  # }}}
 }
 # }}}
 ###

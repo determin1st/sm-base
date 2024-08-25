@@ -20,8 +20,12 @@ require_once __DIR__.DIRECTORY_SEPARATOR.'sysapi.php';
 class Promise # {{{
 {
   # TODO: cancel():void ?
-  # TODO: refine/test column result
+  # TODO: title() to set promise title
+  # TODO: tolerate() to make promise okayish in the end?
+  # TODO: loop property for detachment?
+  # TODO: row halt/wakeup problem
   # TODO: refine result loggable
+  # TODO: refine/test column result
   # TODO: await in await?
   # TODO: time stats?
   # basis {{{
@@ -39,9 +43,16 @@ class Promise # {{{
   # construction (stasis) {{{
   static function from(object|array|null $x): self # {{{
   {
-    return new self(($x instanceof Completable)
-      ? $x : Completable::from($x)
-    );
+    return match (true) {
+      ($x instanceof Completable) => new self($x),
+      ($x instanceof self) => $x,
+      default => new self(Completable::from($x))
+    };
+  }
+  # }}}
+  static function Nop(): self # {{{
+  {
+    return new self(new Completable_Nop());
   }
   # }}}
   static function Error(object $e): self # {{{
@@ -77,12 +88,12 @@ class Promise # {{{
   }
   # }}}
   static function Row(# {{{
-    array $group, int $break=0,
+    array $list, int $break=0,
     int $first=0, bool $any=false
   ):self
   {
     return new self(
-      new Completable_Row($group, $break, $first, $any)
+      Completable_Row::new($list, $break, $first, $any)
     );
   }
   # }}}
@@ -115,12 +126,12 @@ class Promise # {{{
   }
   # }}}
   function thenRow(# {{{
-    array $group, int $break=0,
+    array $list, int $break=0,
     int $first=0, bool $any=false
   ):self
   {
     return $this->_queueAppendOne(
-      new Completable_Row($group, $break, $first)
+      Completable_Row::new($list, $break, $first, $any)
     );
   }
   # }}}
@@ -143,13 +154,13 @@ class Promise # {{{
   }
   # }}}
   function okayRow(# {{{
-    array $group, int $break=0,
+    array $list, int $break=0,
     int $first=0, bool $any=false
   ):self
   {
     return $this->_queueAppendOne(
       new Completable_OkayThen(
-      new Completable_Row($group, $break, $first)
+      Completable_Row::new($list, $break, $first, $any)
     ));
   }
   # }}}
@@ -181,13 +192,13 @@ class Promise # {{{
   }
   # }}}
   function failRow(# {{{
-    array $group, int $break=0,
+    array $list, int $break=0,
     int $first=0, bool $any=false
   ):self
   {
     return $this->_queueAppendOne(
       new Completable_FailThen(
-      new Completable_Row($group, $break, $first)
+      Completable_Row::new($list, $break, $first, $any)
     ));
   }
   # }}}
@@ -265,7 +276,7 @@ class Promise # {{{
     $this->_queue->unshift($completable);
   }
   # }}}
-  function _queueInject(object $promise): void # {{{
+  function _queueInsert(object $promise): void # {{{
   {
     $q0 = $this->_queue;
     $o0 = $q0->shift();
@@ -278,7 +289,7 @@ class Promise # {{{
     $q0->unshift($o0);
   }
   # }}}
-  function _queueInjectOne(object $completable): void # {{{
+  function _queueInsertOne(object $completable): void # {{{
   {
     $q0 = $this->_queue;
     $o0 = $q0->shift();
@@ -300,9 +311,6 @@ class Promise # {{{
   {
     $this->result  = new PromiseResult($this);
     $this->pending = $this->_queue->count();
-    if ($this->_time < 0) {
-      $this->_time = 1;
-    }
     return $this;
   }
   # }}}
@@ -466,23 +474,7 @@ class Loop # {{{
   }
   # }}}
   # stasis {{{
-  static function gear(object $o): object # {{{
-  {
-    # a gear is a completable that
-    # is initialized with its carrier promise -
-    # it enables cancellation without a single run;
-    # gears are placed in the loop's row
-    # prior to other/dependant promises;
-    # they suppose to execute indefinitely and
-    # are removed upon cancellation which
-    # usually happens on shutdown.
-    ###
-    self::$LOOP->rowAttach($p = new Promise($o));
-    $o->result = $p->result;
-    return $o;
-  }
-  # }}}
-  static function queue(array $group=[]): object # {{{
+  static function Queue(array $group=[]): object # {{{
   {
     $q = new Completable_Queue($group);
     $p = new Promise($q);
@@ -490,6 +482,20 @@ class Loop # {{{
     self::$LOOP->rowAttach($p);
     $q->result = $p->result;
     return $q;
+  }
+  # }}}
+  static function gear(object $o): object # {{{
+  {
+    # a gear takes and returns completable that
+    # is initialized with its carrier promise -
+    # it enables cancellation without a single run;
+    # gears are supposed to be placed early
+    # in the loop, they execute indefinitely and
+    # are removed upon shutdown cancellation;
+    ###
+    self::$LOOP->rowAttach($p = new Promise($o));
+    $o->result = $p->result;
+    return $o;
   }
   # }}}
   static function cooldown(int $ms=0): void # {{{
@@ -509,9 +515,10 @@ class Loop # {{{
     self::$LOOP->spinYield--;
   }
   # }}}
-  static function attach(object $p): void # {{{
+  static function attach(object $p): object # {{{
   {
     self::$LOOP->rowAttach($p);
+    return $p;
   }
   # }}}
   static function attach_all(array $a): void # {{{
@@ -893,10 +900,10 @@ abstract class Completable # {{{
   static function from(?object $x): object
   {
     return $x
-      ? (($x instanceof self)
-        ? $x
-        : (($x instanceof Closure)
-          ? new Completable_Op($x)
+      ? (($x instanceof Closure)
+        ? new Completable_Op($x)
+        : (($x instanceof self)
+          ? $x
           : (($x instanceof Error)
             ? new Completable_Error($x)
             : new Completable_Value($x))))
@@ -934,8 +941,8 @@ abstract class Completable_Action extends Completable
         if ($o === $r) {
           return false;
         }
-        # user wants to swap
-        $r->promiseInject($o);
+        # expansion
+        $r->promiseInsert($o);
       }
     }
     catch (Throwable $e) {
@@ -1021,7 +1028,7 @@ class Completable_OkayThen extends Completable_Then
   function _complete(): bool
   {
     $r = $this->result;
-    $r->ok && $r->promiseInject($this->what);
+    $r->ok && $r->promiseInsert($this->what);
     $r->promiseNoDelay();
     return true;
   }
@@ -1037,7 +1044,7 @@ class Completable_FailThen extends Completable_Then
   function _complete(): bool
   {
     $r = $this->result;
-    $r->ok || $r->promiseInject($this->what);
+    $r->ok || $r->promiseInsert($this->what);
     $r->promiseNoDelay();
     return true;
   }
@@ -1107,7 +1114,7 @@ class Completable_Delay extends Completable # {{{
       return false;
     }
     if ($this->what) {
-      $this->result->promiseInject($this->what);
+      $this->result->promiseInsert($this->what);
     }
     $this->result->promiseNoDelay();
     $this->stage = 1;
@@ -1120,155 +1127,246 @@ class Completable_Delay extends Completable # {{{
 class Completable_Row extends Completable # {{{
 {
   # basis {{{
-  public ?object $help=null;# helper object
-  public int     $count,$index=0;
+  public int $started=PHP_INT_MAX;
+  public int $done=-1;
   function __construct(
     public ?array $group,
-    public int    $break,
-    public int    $first,
-    public bool   $firstAny
-  ) {
-    $this->count = $n = count($group);
-    if ($break > $n || $break <= 0) {
-      $this->break = $n;# wont break
-    }
-    if ($first > $n || $first <= 0) {
-      $this->first = $n;# none first
-    }
-  }
-  # }}}
-  function _complete(): bool # {{{
+    public int    $count
+  ) {}
+  static function new(
+    array $group, int $break,
+    int $first, bool $any
+  ):object
   {
-    # initialized means finished
-    if ($this->help)
-    {
-      $this->result->_row(
-        $this->help->result, $this->group,
-        $this->index, $this->count
-      );
-      $this->help  = null;
-      $this->group = null;
-      return true;
-    }
-    # initialize
-    $this->help = new Completable_RowHelp($this);
-    Loop::attach_all($this->group);
-    Loop::attach(new Promise($this->help));
-    # suspend til completion
-    $this->result->indexSet(-1)->promiseHalt();
-    return false;
-  }
-  # }}}
-  function _cancel(): void # {{{
-  {
-    # check
-    if (!$this->help) {
-      return;
-    }
-    # cancellation is implemented in the helper
-    if ($r = $this->help->result)
-    {
-      $this->result->_row(
-        $r->isCancelled ? $r : $r->promiseCancel(),
-        $this->group, $this->index, $this->count
-      );
-    }
-    $this->help  = null;
-    $this->group = null;
-  }
-  # }}}
-}
-# }}}
-class Completable_RowHelp extends Completable # {{{
-{
-  # basis {{{
-  public ?array $ready;
-  function __construct(public ?object $base) {
-    $this->ready = array_fill(0, $base->count, false);
+    $n = count($group);
+    $itBreaks = ($break > 0 && $break < $n);
+    $itRaces  = ($first > 0 && $first < $n);
+    return $itBreaks
+      ? ($itRaces
+        ? ($any
+          ? new Completable_RowBreakRaceAny($group, $n, $break, $first)
+          : new Completable_RowBreakRace($group, $n, $break, $first))
+        : new Completable_RowBreak($group, $n, $break))
+      : ($itRaces
+        ? ($any
+          ? new Completable_RowRaceAny($group, $n, $first)
+          : new Completable_RowRace($group, $n, $first))
+        : new self($group, $n));
+    #####
   }
   # }}}
   function _complete(): bool # {{{
   {
     # prepare
-    $base = $this->base;
-    $time = PHP_INT_MAX;
-    $more = 0;
-    # check group promises
-    foreach ($base->group as $i => $p)
+    $time  = self::$HRTIME;
+    $wait  = PHP_INT_MAX;
+    $group = $this->group;
+    $count = $this->count;
+    $done  = &$this->done;
+    # check not initialized
+    if ($done === -1)
     {
-      # skip ready
-      if ($this->ready[$i]) {
-        continue;
-      }
-      # skip pending
-      if ($p->pending)
+      # do a single initializational pass
+      $done++;
+      $this->started = self::$HRTIME;
+      for ($i=0; $i < $count; ++$i)
       {
-        # select smallest timestamp
-        if ($time > $p->_time) {
-          $time = $p->_time;
-        }
-        $more++;
-        continue;
-      }
-      # set ready and check successful
-      $this->ready[$i] = true;
-      $p->result->index = $base->index;
-      if ($p->result->ok)
-      {
-        $base->index++;
-        goto x1;
-      }
-      # failed, check break condition
-      if ($base->break && --$base->break === 0)
-      {
-        $base->result->indexSet($i)->promiseWakeup();
-        $this->result->ok = false;
-        $this->stop('break');
-        return true;
-      }
-      if ($base->firstAny)
-      {
-      x1:# check race condition
-        if ($base->first && --$base->first === 0)
+        # do inititalize and execute
+        $p = $group[$i];
+        if ($p->_init()->_execute())
         {
-          $base->result->indexSet($i)->promiseWakeup();
-          $this->stop('race');
+          if ($p->_time < $wait) {
+            $wait = $p->_time;
+          }
+          continue;
+        }
+        # update both index and counter
+        $p->result->index = $done++;
+        # check very early completion
+        if ($this->check($p->result->ok, 1+$i))
+        {
+          $this->result->index = $i;
           return true;
         }
       }
     }
-    # check more to go
-    if ($more)
+    else
     {
-      $this->result->promiseWakeup($time);
+      # normal iteration
+      for ($i=0; $i < $count; ++$i)
+      {
+        # skip finished
+        $p = $group[$i];
+        if ($p->pending === 0) {
+          continue;
+        }
+        # when idle or still executing,
+        # inherit minimal delay
+        if ($p->_time > $time || $p->_execute())
+        {
+          if ($p->_time < $wait) {
+            $wait = $p->_time;
+          }
+          continue;
+        }
+        # update both index and counter
+        $p->result->index = $done++;
+        # check early completion
+        if ($this->check($p->result->ok, 0))
+        {
+          $this->result->index = $i;
+          return true;
+        }
+      }
+    }
+    # check incomplete
+    if ($done < $count)
+    {
+      if ($wait > $time) {
+        $this->result->promiseWakeup($wait);
+      }
       return false;
     }
-    # all finished
-    $base->result->promiseWakeup();
-    $this->base  = null;
-    $this->ready = null;
+    # complete
+    $this->result->index = $done;
+    $this->result->_row(
+      $group, 0, $done, $count, $this->started
+    );
+    $this->group = null;
     return true;
   }
   # }}}
   function _cancel(): void # {{{
   {
-    $this->base && $this->stop();
+    $this->group && $this->stop();
   }
   # }}}
-  function stop(string $reason=''): void # {{{
+  function check(bool $ok, int $truncate): bool # {{{
   {
-    foreach ($this->base->group as $i => $p)
+    return false;
+  }
+  # }}}
+  function stop(# {{{
+    int $count=0, int $reason=2
+  ):bool
+  {
+    # prepare
+    $group = $this->group;
+    $done  = $this->done;
+    $this->group = null;
+    if ($count) {
+      $group = array_slice($group, 0, $count);
+    }
+    else {
+      $count = $this->count;
+    }
+    # cancel unfinished promises
+    $reasonText = match ($reason) {
+      0 => 'race',
+      1 => 'break',
+      default => ''
+    };
+    for ($i=0,$j=$done; $i < $count; ++$i)
     {
+      $p = $group[$i];
       if ($p->pending > 0)
       {
-        $p->cancel($reason);
-        $p->result->index = -1;
+        $p->cancel($reasonText);
+        $p->result->index = $j++;
       }
     }
-    $this->base  = null;
-    $this->ready = null;
+    # set the result
+    $this->result->_row(
+      $group, $reason ? 2 : 3,
+      $done, $count, $this->started
+    );
+    return true;
   }
   # }}}
+  function stopBreak(int $truncate): bool # {{{
+  {
+    $this->result->ok = false;
+    return $this->stop($truncate, 1);
+  }
+  # }}}
+  function stopRace(int $truncate): bool # {{{
+  {
+    return $this->stop($truncate, 0);
+  }
+  # }}}
+}
+# }}}
+class Completable_RowBreak extends Completable_Row # {{{
+{
+  function __construct(
+    public ?array $group,
+    public int    $count,
+    public int    $break
+  ) {}
+  function check(bool $ok, int $truncate): bool
+  {
+    return (!$ok && --$this->break === 0)
+      ? $this->stopBreak($truncate)
+      : false;
+  }
+}
+# }}}
+class Completable_RowBreakRace extends Completable_Row # {{{
+{
+  function __construct(
+    public ?array $group,
+    public int    $count,
+    public int    $break,
+    public int    $race
+  ) {}
+  function check(bool $ok, int $truncate): bool
+  {
+    return $ok
+      ? ((--$this->race === 0)
+        ? $this->stopRace($truncate)
+        : false)
+      : ((--$this->break === 0)
+        ? $this->stopBreak($truncate)
+        : false);
+  }
+}
+# }}}
+class Completable_RowBreakRaceAny extends Completable_RowBreakRace # {{{
+{
+  function check(bool $ok, int $truncate): bool
+  {
+    $this->race--;
+    return (!$ok && --$this->break === 0)
+      ? $this->stopBreak($truncate)
+      : (($this->race <= 0)
+        ? $this->stopRace($truncate)
+        : false);
+  }
+}
+# }}}
+class Completable_RowRace extends Completable_Row # {{{
+{
+  function __construct(
+    public ?array $group,
+    public int    $count,
+    public int    $race
+  ) {}
+  function check(bool $ok, int $truncate): bool
+  {
+    return ($ok && --$this->race === 0)
+      ? $this->stopRace($truncate)
+      : false;
+  }
+}
+# }}}
+class Completable_RowRaceAny extends Completable_RowRace # {{{
+{
+  function check(bool $ok, int $truncate): bool
+  {
+    return (--$this->race === 0)
+      ? $this->stopRace($truncate)
+      : false;
+  }
 }
 # }}}
 class Completable_Column extends Completable # {{{
@@ -1510,28 +1608,28 @@ class PromiseResult implements ArrayAccess,Loggable
   }
   # }}}
   function _row(# {{{
-    object $r, array $group, int $done, int $total
+    array $group, int $level,
+    int $done, int $count, int $time
   ):void
   {
     # extract data required
     $tracks = [];
+    $order  = array_fill(0, $count, 0);
     $values = [];
-    $order  = [];
-    foreach ($group as $p)
+    for ($i=0; $i < $count; ++$i)
     {
-      $pr = $p->result;
-      $tracks[] = $pr->track;
-      $values[] = $pr->value;
-      $order[]  = $pr->index;
+      $r = $group[$i]->result;
+      $tracks[$i] = $r->track;
+      $order[$r->index] = $i;
+      $values[$i] = $r->value;
     }
-    # add the row track
+    # add the trace
     $this->_track()->trace[] = [
-      self::IS_ROW, $tracks, $order,
-      $done, $total, $r->track->duration()
+      self::IS_ROW, $tracks, $order, $level,
+      $done, $count, self::$HRTIME - $time
     ];
     # set values
     $this->value = $values;
-    $this->ok = $r->ok;
   }
   # }}}
   function _column(# {{{
@@ -1709,37 +1807,7 @@ class PromiseResult implements ArrayAccess,Loggable
         ];
         break;
       case self::IS_ROW:
-        $b = [];
-        foreach ($t[1] as $j => $trk)
-        {
-          $level = $trk->ok ? 0 : 2;
-          if (($order = $t[2][$j]) >= 0)
-          {
-            $msg = ['#'.$order];
-            $trk->title && array_push(
-              $msg, ...$trk->title
-            );
-          }
-          else {
-            $msg = $trk->title;
-          }
-          $logs = self::trace_logs($trk->trace);
-          $trk->prev && array_push(
-            $logs, ...self::track_logs($trk->prev)
-          );
-          $b[] = [
-            'level' => $level,
-            'msg'   => $msg,
-            'span'  => $trk->duration(),
-            'logs'  => $logs
-          ];
-        }
-        $a[] = [
-          'level' => 3,
-          'msg'   => ['ROW', $t[3].'/'.$t[4]],
-          'span'  => $t[5],
-          'logs'  => $b
-        ];
+        $a[] = self::log_row($t);
         break;
       case self::IS_FUSION:
         # a nesting,
@@ -1770,6 +1838,83 @@ class PromiseResult implements ArrayAccess,Loggable
       }
     }
     return $a;
+  }
+  # }}}
+  static function log_row(array $row): array # {{{
+  {
+    # compose ordered tracks
+    $a = [];
+    $i = 0;
+    $grpSize = $grpSpan = 0;
+    $grpIdx  = [];
+    foreach ($row[2] as $idx)
+    {
+      $trk = $row[1][$idx];
+      if ($trk->ok)
+      {
+        # try groupping positive empty tracks
+        if ($trk->isEmpty())
+        {
+          # start new group
+          if (!$grpSize)
+          {
+            $grpIdx[$grpSize++] = $idx;
+            $grpSpan = $trk->duration();
+            continue;
+          }
+          # resume the group
+          $grpIdx[$grpSize++] = $idx;
+          $span = $trk->duration();
+          if ($span > $grpSpan) {
+            $grpSpan = $span;
+          }
+          continue;
+        }
+        $level = 0;
+      }
+      else {
+        $level = 2;
+      }
+      # close the group
+      if ($grpSize)
+      {
+        $a[$i++] = [
+          'level' => 0,
+          'msg'   => ['INDEX', implode(',', $grpIdx)],
+          'type'  => 1,
+          'span'  => $grpSpan
+        ];
+        $grpSize = 0;
+        $grpIdx  = [];
+      }
+      # add standalone report
+      $logs = self::trace_logs($trk->trace);
+      $trk->prev && array_push(
+        $logs, ...self::track_logs($trk->prev)
+      );
+      $a[$i++] = [
+        'level' => $level,
+        'msg'   => $trk->title,
+        'span'  => $trk->duration(),
+        'logs'  => $logs
+      ];
+    }
+    # close the group
+    if ($grpSize)
+    {
+      $a[$i] = [
+        'level' => 0,
+        'msg'   => ['INDEX', implode(',', $grpIdx)],
+        'type'  => 1,
+        'span'  => $grpSpan
+      ];
+    }
+    return [
+      'level' => $row[3],
+      'msg'   => ['ROW', $row[4].'/'.$row[5]],
+      'span'  => $row[6],
+      'logs'  => array_reverse($a)
+    ];
   }
   # }}}
   # }}}
@@ -1816,14 +1961,15 @@ class PromiseResult implements ArrayAccess,Loggable
   # }}}
   function confirm(...$msg): self # {{{
   {
-    # check finished, already confirmed or
-    # there is nothing to confirm
-    if (!$this->promise || $this->track->title ||
-        !$this->track->trace)
+    # check not confirmed and
+    # there's something to confirm
+    $t = $this->track;
+    if (!$t->title && $t->trace)
     {
-      return $this;
+      $t->title = ErrorEx::stringify($msg);
+      $t->span  = self::$HRTIME - $t->span;
     }
-    return $this->_title($msg);
+    return $this;
   }
   # }}}
   function title(...$msg): self # {{{
@@ -1948,14 +2094,14 @@ class PromiseResult implements ArrayAccess,Loggable
     $this->promise->_time = 0;
   }
   # }}}
-  function promiseInject(object $o): void # {{{
+  function promiseInsert(object $o): void # {{{
   {
     if ($o instanceof Promise) {
-      $this->promise->_queueInject($o);
+      $this->promise->_queueInsert($o);
     }
     else
     {
-      $this->promise->_queueInjectOne(
+      $this->promise->_queueInsertOne(
         Completable::from($o)
       );
     }
@@ -1986,7 +2132,7 @@ class PromiseResult implements ArrayAccess,Loggable
     return $this;
   }
   # }}}
-  function promiseFuse(object $o): void # {{{
+  function promiseFuse(object $p): void # {{{
   {
     # settle current track timespan
     if (!($track = $this->track)->title) {
@@ -2001,7 +2147,7 @@ class PromiseResult implements ArrayAccess,Loggable
     # set nodelay and replace queue
     $this->promise->_time = 0;
     $this->promise->_queueTruncate();
-    $this->promiseInject($o);
+    $this->promiseInsert($p);
   }
   # }}}
   function promisePrepend(object $o): self # {{{
@@ -2076,6 +2222,11 @@ class PromiseResultTrack
       $a['prev'] = $this->prev;
     }
     return $a;
+  }
+  # }}}
+  function isEmpty(): bool # {{{
+  {
+    return (!$this->prev && !$this->trace);
   }
   # }}}
   function duration(): int # {{{

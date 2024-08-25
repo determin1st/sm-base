@@ -353,15 +353,15 @@ class ErrorEx extends Error # {{{
       return $a;
     }
     # compose group
-    $a = [$a];
+    $b = [];
     do {
-      $a[] = $e->logSelf();
+      $b[] = $e->logSelf();
     }
     while ($e = $e->next);
-    return [
-      'level' => $this->errorlevel(2),
-      'logs'  => $a,
-    ];
+    ###
+    $a['level'] = $this->errorlevel(2);
+    $a['logs']  = $b;
+    return $a;
   }
   # }}}
   function logLevel(): int # {{{
@@ -1061,7 +1061,6 @@ class ErrorLog implements Mustachable # {{{
     'msg-type'=>0,'msg-path'=>[],'msg-title'=>'','msg-block'=>[],
   ];
   # }}}
-  ###
   # basis {{{
   static self   $I;
   public object $mustache;

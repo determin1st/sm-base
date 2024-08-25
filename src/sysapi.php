@@ -16,7 +16,7 @@ abstract class Sys_Base # {{{
     if (self::$API) {
       return;
     }
-    if (!class_exists('FFI'))
+    if (!class_exists('FFI', false))
     {
       throw ErrorEx::fail(__CLASS__,
         'FFI extension is required'

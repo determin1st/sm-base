@@ -6,15 +6,20 @@ require_once(
   'autoload.php'
 );
 ###
-#$h = Sys::get_stdin_handle();
-#Sys::read_console_input($h, 1);
-#exit;
-###
-if ($e = Process::init('sm-process-test'))
+$startCount = [5,10,20,50,100];
+$startIdx   = 0;
+$e = Process::init([
+  'group' => 'sm-process-test',
+  'role'  => 'auto',
+  'autonomy' => false,
+  'handler'  => null
+]);
+if (ErrorEx::is($e))
 {
-  echo ErrorLog::render($e);
+  echo ErrorLog::render($e, true);
   exit();
 }
+###
 if (Process::is_master())
 {
   ###
@@ -31,18 +36,21 @@ else
 {
   ###
   Process::set_handler(slave_handler(...));
-  await(sleep(2000));
-  Process::$BASE->output('hello');
+  echo "hello, im pid=".Fx::$PROCESS_ID."\n";
   await(sleep(10000));
 }
 exit();
 ###
 function master_loop(): void # {{{
 {
+  global $startCount,$startIdx;
   $p0 = Promise::Value('i');
   $p1 = null;
   while (1)
   {
+    /**
+    * WAIT FOR AND DISPLAY THE RESULT
+    */
     if (!($r = await_any($p0,$p1))->ok &&
         !$r->isCancelled)
     {
@@ -53,94 +61,133 @@ function master_loop(): void # {{{
     {
       $p1 = null;
       echo ErrorLog::render($r);
+      continue;
     }
-    else
-    {
-      $p0  = Conio::readch();
-      $k   = $r->value;
-      $say =  "> ".$k."\n";
+    /**
+    * HANDLE KEY/CHAR COMMANDS
+    */
+    $p0 = Conio::readch();
+    $k  = $r->value;
+    echo "> ".$k."\n";
+    switch ($k) {
+    case 'i':
+      show_menu();
+      break;
       ###
-      switch ($k) {
-      case 'i':
-        echo <<<TEXT
-$say
-      Process master
-    ╔═══╗
-    ║ 1 ║ start new process
-    ║ 2 ║ list process identifiers
-    ║ 3 ║ stop one (first)
-    ║ 0 ║ stop all
-    ╠═══╣
-    ║ i ║ information
-    ║ q ║ quit
-    ╚═══╝
-
-
-TEXT;
-        ###
-        break;
-      case 'q':
-        echo $say;
-        break 2;
-        ###
-      case '1':
-        ###
-        echo $say;
-        $p1 || $p1 = Process
-        ::start(__FILE__)
-        ->then(function(object $r): void {
-          if ($r->ok) {
-            $r->info('pid', $r->value);
-          }
-          else
-          {
-            $r->warn('tolerate error');
-            $r->ok = true;
-          }
-          $r->title('Process::start', __FILE__);
-        });
-        break;
-        ###
-      case '2':
-        ###
-        $a = Process::list();
-        echo "> list[".count($a)."]";
-        if ($a) {
-          echo ": ".implode(', ', $a);
-        }
-        echo "\n";
-        break;
-        ###
-      case '3':
-        ###
-        echo $say;
-        if (!$p1)
-        {
-          $id = ($a = Process::list())
-            ? $a[0]
-            : '12345';
-          ###
-          $p1 = Process
-          ::stop($id)
-          ->then(function(object $r) use ($id): void {
-            $r->title('Process::stop', $id);
-          });
-        }
-        break;
-        ###
-      case '0':
-        ###
-        echo $say;
-        $p1 || $p1 = Process
-        ::stop_all()
-        ->then(function(object $r):void {
-          $r->title('Process::stop_all');
-        });
-        break;
+    case 'n':
+      ###
+      if (++$startIdx >= count($startCount)) {
+        $startIdx = 0;
       }
+      show_menu();
+      break;
+      ###
+    case 'q':
+      break 2;
+      ###
+    case '1':
+      ###
+      $p1 || $p1 = Process
+      ::start(__FILE__)
+      ->then(function(object $r): void {
+        if ($r->ok) {
+          $r->info('pid', $r->value);
+        }
+        else
+        {
+          $r->warn('tolerate error');
+          $r->ok = true;
+        }
+        $r->title('Process::start', __FILE__);
+      });
+      break;
+      ###
+    case '2':
+      ###
+      $count = $startCount[$startIdx];
+      $p1 || $p1 = Process
+      ::start_group(__FILE__, $count)
+      ->then(function(object $r) use ($count): void {
+        if ($r->ok) {
+          $r->info('pids', implode(',', $r->value));
+        }
+        else
+        {
+          $r->warn('tolerate error');
+          $r->ok = true;
+        }
+        $r->title('Process::startGroup',
+          $count, __FILE__
+        );
+      });
+      break;
+      ###
+    case '4':
+      ###
+      $a = Process::list();
+      echo "> list[".count($a)."]";
+      if ($a) {
+        echo ": ".implode(', ', $a);
+      }
+      echo "\n";
+      break;
+      ###
+    case '9':
+      ###
+      if (!$p1)
+      {
+        $id = ($a = Process::list())
+          ? $a[0]
+          : '12345';
+        ###
+        $p1 = Process
+        ::stop($id)
+        ->then(function(object $r) use ($id): void {
+          $r->title('Process::stop', $id);
+        });
+      }
+      break;
+      ###
+    case '0':
+      ###
+      $p1 || $p1 = Process
+      ::stop_all()
+      ->then(function(object $r):void {
+        $r->title('Process::stop_all');
+      });
+      break;
+    default:
+      # unknown
+      Conio::clear_output();
+      break;
     }
   }
   echo "\n";
+}
+# }}}
+function show_menu(): void # {{{
+{
+  global $startCount,$startIdx;
+  $startList = list_view($startCount, $startIdx);
+  $startCnt = $startCount[$startIdx];
+  echo <<<TEXT
+      process master
+    ╔═══╗
+    ║ 1 ║ start slave process
+    ║ 2 ║ start slamaster process
+    ║ 3 ║ start a flock of slave processes ($startCnt)
+    ║ 4 ║ list pids
+    ╠═══╣
+    ║ 8 ║ stop one process
+    ║ 9 ║ stop multiple processes
+    ║ 0 ║ stop all processes
+    ╠═══╣
+    ║ i ║ information
+    ║ n ║ flock size $startList
+    ║ q ║ quit
+    ╚═══╝
+
+TEXT;
 }
 # }}}
 function master_handler(array $event): void # {{{
@@ -169,13 +216,20 @@ function slave_handler(array $event): void # {{{
   foreach ($event as $e)
   {
     echo "> command: ".$e[0]."\n";
-    ###
     switch ($e[0]) {
     case 'error':
       echo ErrorLog::render($e[2]);
       break;
     }
   }
+}
+# }}}
+function list_view($list, $idx): string # {{{
+{
+  $x = ','.implode(',', $list).',';
+  $s = $list[$idx];
+  $x = str_replace(','.$s.',', ',['.$s.'],', $x);
+  return trim($x, ',');
 }
 # }}}
 ###

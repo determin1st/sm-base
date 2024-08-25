@@ -13,6 +13,7 @@ use const
   DIRECTORY_SEPARATOR;
 ###
 require_once __DIR__.DIRECTORY_SEPARATOR.'promise.php';
+###
 # }}}
 # primitives {{{
 class SyncBuffer # {{{

@@ -288,7 +288,7 @@ while ($ch = show_menu($hosts, $hostIdx))
   case 'l':# {{{
     $hostIdx = $hostIdx ? 0 : 1;
     $hi->url($hosts[$hostIdx])->save();
-    Conio::clear();
+    Conio::clear_output();
     continue 2;
   # }}}
   case 'q':
